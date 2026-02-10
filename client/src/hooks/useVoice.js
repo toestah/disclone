@@ -42,6 +42,16 @@ export default function useVoice(channelId) {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
+            {
+              urls: 'turn:openrelay.metered.ca:80',
+              username: 'openrelayproject',
+              credential: 'openrelayproject',
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443',
+              username: 'openrelayproject',
+              credential: 'openrelayproject',
+            },
           ],
         },
       });
@@ -212,15 +222,11 @@ export default function useVoice(channelId) {
       if (cancelled) return;
 
       // Step 3: NOW join the voice channel on the server
-      // This ensures our stream is ready before peers try to connect
-      socket.emit('voice:join', { channelId }, (response) => {
-        if (cancelled || !response?.success) return;
-
-        // Step 4: Initiate connections to peers already in the room
-        for (const peer of response.peers) {
-          createPeer(peer.socketId, true);
-        }
-      });
+      // This ensures our stream is ready before peers try to connect.
+      // We do NOT initiate connections here — existing members will
+      // receive voice:user-joined and initiate toward us. We just
+      // wait for their offers in handleOffer.
+      socket.emit('voice:join', { channelId });
     }
 
     init();
