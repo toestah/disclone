@@ -1,0 +1,6 @@
+node_modules
+dist
+certs
+.git
+.claude
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "id": "com.datapulsecorp.disclone",
+  "title": "Disclone",
+  "author": "Taimur",
+  "description": "Discord clone with real-time text and voice chat",
+  "tagline": "Voice & text chat",
+  "version": "1.0.0",
+  "healthCheckPath": "/",
+  "httpPort": 3000,
+  "addons": {},
+  "manifestVersion": 2,
+  "website": "https://github.com/toestah/disclone",
+  "tags": ["chat", "voice"]
+}
