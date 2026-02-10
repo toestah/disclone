@@ -12,6 +12,10 @@ RUN npm install --omit=dev && \
     npm install --prefix server --omit=dev && \
     npm install --prefix client
 
+# Cloudron manifest
+RUN mkdir -p /app/pkg
+COPY CloudronManifest.json /app/pkg/
+
 # Copy source code
 COPY server/ ./server/
 COPY client/ ./client/
