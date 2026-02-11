@@ -364,13 +364,45 @@ export default function useVoice(channelId) {
 
         // ── Handle frames from capture worklet ──
         let frameTimestamp = 0;
+        let gateWasOpen = false;
+        let fadeOutRemaining = 0;
+        const FADE_OUT_FRAMES = 3; // 3 × 20ms = 60ms fade-out
+        const FADE_IN_SAMPLES = Math.round(nativeRate * 0.005); // 5ms fade-in
 
         captureNode.port.onmessage = (e) => {
           if (isMutedRef.current || cancelled) return;
           const { pcm } = e.data;
 
-          // VAD gate
-          if (performance.now() - lastSpeechTimeRef.current > GATE_HOLD_MS) return;
+          const gateOpen = performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS;
+          let frame;
+
+          if (gateOpen) {
+            if (!gateWasOpen) {
+              // Gate just opened — fade-in to avoid click
+              frame = new Float32Array(pcm.length);
+              for (let i = 0; i < pcm.length; i++) {
+                frame[i] = pcm[i] * (i < FADE_IN_SAMPLES ? i / FADE_IN_SAMPLES : 1);
+              }
+            } else {
+              frame = pcm;
+            }
+            gateWasOpen = true;
+            fadeOutRemaining = FADE_OUT_FRAMES;
+          } else if (fadeOutRemaining > 0) {
+            // Gate closed — smooth fade-out over remaining frames
+            frame = new Float32Array(pcm.length);
+            const startGain = fadeOutRemaining / (FADE_OUT_FRAMES + 1);
+            const endGain = (fadeOutRemaining - 1) / (FADE_OUT_FRAMES + 1);
+            for (let i = 0; i < pcm.length; i++) {
+              const t = i / pcm.length;
+              frame[i] = pcm[i] * (startGain + (endGain - startGain) * t);
+            }
+            fadeOutRemaining--;
+            if (fadeOutRemaining === 0) gateWasOpen = false;
+          } else {
+            gateWasOpen = false;
+            return;
+          }
 
           // Check if all peers can decode Opus
           let allPeersOpus = true;
@@ -383,10 +415,10 @@ export default function useVoice(channelId) {
               const audioData = new AudioData({
                 format: 'f32-planar',
                 sampleRate: nativeRate,
-                numberOfFrames: pcm.length,
+                numberOfFrames: frame.length,
                 numberOfChannels: 1,
                 timestamp: frameTimestamp,
-                data: pcm,
+                data: frame,
               });
               encoder.encode(audioData);
               audioData.close();
@@ -396,9 +428,9 @@ export default function useVoice(channelId) {
             }
           } else {
             // PCM fallback
-            const int16 = new Int16Array(pcm.length);
-            for (let i = 0; i < pcm.length; i++) {
-              int16[i] = Math.max(-32768, Math.min(32767, (pcm[i] * 32767) | 0));
+            const int16 = new Int16Array(frame.length);
+            for (let i = 0; i < frame.length; i++) {
+              int16[i] = Math.max(-32768, Math.min(32767, (frame[i] * 32767) | 0));
             }
             socket.volatile.emit('audio:chunk', {
               channelId: channelIdRef.current,

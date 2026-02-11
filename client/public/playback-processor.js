@@ -2,8 +2,10 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._peers = new Map();
-    this._prefillSamples = Math.round(sampleRate * 0.08); // 80ms prefill
+    this._prefillSamples = Math.round(sampleRate * 0.1); // 100ms prefill (was 80ms)
     this._underrunLimit = Math.ceil(sampleRate * 0.1 / 128); // ~100ms
+    this._fadeInLength = Math.round(sampleRate * 0.005); // 5ms fade-in
+    this._decay = Math.exp(-1 / (sampleRate * 0.003)); // 3ms exponential decay
 
     this.port.onmessage = (e) => {
       const { peerId, pcm, removePeer, clear } = e.data;
@@ -20,7 +22,11 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         let peer = this._peers.get(peerId);
         if (!peer) {
           const size = sampleRate * 2; // 2s ring buffer
-          peer = { ring: new Float32Array(size), size, w: 0, r: 0, started: false, underruns: 0 };
+          peer = {
+            ring: new Float32Array(size), size, w: 0, r: 0,
+            started: false, underruns: 0,
+            lastSample: 0, fadeIn: 0,
+          };
           this._peers.set(peerId, peer);
         }
         for (let i = 0; i < pcm.length; i++) {
@@ -47,6 +53,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         if (buffered >= this._prefillSamples) {
           peer.started = true;
           peer.underruns = 0;
+          peer.fadeIn = this._fadeInLength;
         } else {
           continue;
         }
@@ -55,9 +62,22 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       let hasData = false;
       for (let i = 0; i < output.length; i++) {
         if (peer.r < peer.w) {
-          output[i] += peer.ring[peer.r % peer.size];
+          let sample = peer.ring[peer.r % peer.size];
           peer.r++;
+
+          // Fade-in after prefill to avoid click
+          if (peer.fadeIn > 0) {
+            sample *= 1 - (peer.fadeIn / this._fadeInLength);
+            peer.fadeIn--;
+          }
+
+          output[i] += sample;
+          peer.lastSample = sample;
           hasData = true;
+        } else if (Math.abs(peer.lastSample) > 0.0001) {
+          // Smooth exponential decay to zero when data runs out
+          peer.lastSample *= this._decay;
+          output[i] += peer.lastSample;
         }
       }
 
@@ -66,6 +86,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         if (peer.underruns > this._underrunLimit) {
           peer.started = false;
           peer.underruns = 0;
+          peer.lastSample = 0;
         }
       } else {
         peer.underruns = 0;

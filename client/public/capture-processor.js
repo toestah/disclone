@@ -23,7 +23,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
           const a = Math.abs(this._buffer[j]);
           if (a > peak) peak = a;
         }
-        if (peak > 0.001) {
+        if (peak > 0.0001) {
           this.port.postMessage({ pcm: this._buffer.slice() });
         }
         this._offset = 0;
