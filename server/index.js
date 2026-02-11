@@ -65,6 +65,9 @@ const speakingState = new Map();
 // Muted state: socketId -> boolean
 const mutedState = new Map();
 
+// Client capabilities: socketId -> { opus: boolean }
+const clientCapabilities = new Map();
+
 let messageIdCounter = 0;
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -225,7 +228,7 @@ io.on('connection', (socket) => {
 
   // ── Voice Channels ──
 
-  socket.on('voice:join', ({ channelId }, callback) => {
+  socket.on('voice:join', ({ channelId, capabilities }, callback) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
     console.log(`[Voice] ${session.username} (${socket.id}) joining ${channelId}`);
@@ -252,6 +255,7 @@ io.on('connection', (socket) => {
     // Join new voice room
     const room = voiceRooms.get(channelId);
     room.add(socket.id);
+    clientCapabilities.set(socket.id, capabilities || {});
     socket.join(`voice:${channelId}`);
 
     // Existing peers
@@ -264,6 +268,7 @@ io.on('connection', (socket) => {
             socketId: peerId,
             username: peerSession.username,
             avatarColor: peerSession.avatarColor,
+            capabilities: clientCapabilities.get(peerId) || {},
           });
         }
       }
@@ -276,6 +281,7 @@ io.on('connection', (socket) => {
       socketId: socket.id,
       username: session.username,
       avatarColor: session.avatarColor,
+      capabilities: clientCapabilities.get(socket.id) || {},
     });
 
     callback?.({ success: true, peers: existingPeers });
@@ -297,6 +303,7 @@ io.on('connection', (socket) => {
       socket.leave(`voice:${channelId}`);
       speakingState.delete(socket.id);
       mutedState.delete(socket.id);
+      clientCapabilities.delete(socket.id);
 
       socket.to(`voice:${channelId}`).emit('voice:user-left', {
         channelId,
@@ -370,6 +377,7 @@ io.on('connection', (socket) => {
 
     speakingState.delete(socket.id);
     mutedState.delete(socket.id);
+    clientCapabilities.delete(socket.id);
     activeSessions.delete(socket.id);
     io.emit('users:update', getOnlineUsers());
   });

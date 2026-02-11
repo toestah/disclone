@@ -89,6 +89,7 @@ export default function useVoice(channelId) {
   const playbackNodeRef = useRef(null);
   const encoderRef = useRef(null);
   const decodersRef = useRef(new Map());
+  const peerCapsRef = useRef(new Map());
 
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
@@ -161,6 +162,8 @@ export default function useVoice(channelId) {
           console.error('[Voice] Decode error:', e);
         }
       } else {
+        // If Opus-encoded but we can't decode, skip (don't misinterpret as PCM)
+        if (codec === 'opus') return;
         // PCM fallback
         const int16 = new Int16Array(data);
         let pcm = new Float32Array(int16.length);
@@ -178,13 +181,15 @@ export default function useVoice(channelId) {
 
     // ── Socket event handlers ──
 
-    function handleUserJoined({ socketId }) {
-      console.log(`[Voice] → user-joined: ${socketId}`);
+    function handleUserJoined({ socketId, capabilities }) {
+      console.log(`[Voice] → user-joined: ${socketId}`, capabilities);
+      if (capabilities) peerCapsRef.current.set(socketId, capabilities);
       playChime(playbackCtxRef, 'up');
     }
 
     function handleUserLeft({ socketId }) {
       console.log(`[Voice] → user-left: ${socketId}`);
+      peerCapsRef.current.delete(socketId);
       playChime(playbackCtxRef, 'down');
       const decoder = decodersRef.current.get(socketId);
       if (decoder) {
@@ -367,7 +372,13 @@ export default function useVoice(channelId) {
           // VAD gate
           if (performance.now() - lastSpeechTimeRef.current > GATE_HOLD_MS) return;
 
-          if (useOpus && encoder && encoder.state === 'configured') {
+          // Check if all peers can decode Opus
+          let allPeersOpus = true;
+          for (const caps of peerCapsRef.current.values()) {
+            if (!caps.opus) { allPeersOpus = false; break; }
+          }
+
+          if (useOpus && encoder && encoder.state === 'configured' && allPeersOpus) {
             try {
               const audioData = new AudioData({
                 format: 'f32-planar',
@@ -402,7 +413,18 @@ export default function useVoice(channelId) {
 
       if (cancelled) return;
       console.log('[Voice] Joining', channelId);
-      socket.emit('voice:join', { channelId });
+      const hasOpus = typeof AudioEncoder !== 'undefined' && typeof AudioDecoder !== 'undefined';
+      socket.emit('voice:join', {
+        channelId,
+        capabilities: { opus: hasOpus },
+      }, (response) => {
+        if (response?.success && response.peers) {
+          for (const peer of response.peers) {
+            peerCapsRef.current.set(peer.socketId, peer.capabilities || {});
+          }
+          console.log('[Voice] Peer capabilities:', Object.fromEntries(peerCapsRef.current));
+        }
+      });
     }
 
     init();
@@ -444,6 +466,7 @@ export default function useVoice(channelId) {
         localStreamRef.current = null;
       }
 
+      peerCapsRef.current.clear();
       wasSpeakingRef.current = false;
       lastSpeechTimeRef.current = 0;
       setSpeakingPeers(new Set());
