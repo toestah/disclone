@@ -332,7 +332,7 @@ io.on('connection', (socket) => {
 
   // ── Server-relayed audio ──
 
-  socket.on('audio:chunk', ({ channelId, data, sampleRate }) => {
+  socket.on('audio:chunk', ({ channelId, data, codec, seq, sampleRate }) => {
     // Only relay if sender is actually in this voice room
     const room = voiceRooms.get(channelId);
     if (!room || !room.has(socket.id)) return;
@@ -340,6 +340,8 @@ io.on('connection', (socket) => {
     socket.to(`voice:${channelId}`).volatile.emit('audio:chunk', {
       from: socket.id,
       data,
+      codec,
+      seq,
       sampleRate,
     });
   });

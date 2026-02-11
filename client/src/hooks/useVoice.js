@@ -13,7 +13,6 @@ function playChime(ctxRef, direction) {
       return;
     }
   }
-
   const resumeP = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
   resumeP.then(() => {
     const now = ctx.currentTime + 0.05;
@@ -21,7 +20,6 @@ function playChime(ctxRef, direction) {
     const dur = 0.1;
     const gap = 0.04;
     const freqs = direction === 'up' ? [523.25, 659.25] : [659.25, 523.25];
-
     freqs.forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -42,18 +40,25 @@ function playChime(ctxRef, direction) {
 
 // ── Constants ───────────────────────────────────────────────────
 
-const CAPTURE_BUFFER = 2048;       // ~43ms chunks at 48 kHz
-const JITTER_BUFFER_S = 0.1;       // 100ms initial playback buffer
-const CROSSFADE_S = 0.003;         // 3ms crossfade between chunks
-const GATE_HOLD_MS = 300;          // Keep gate open 300ms after speech stops
-
-// ── Helpers ─────────────────────────────────────────────────────
+const GATE_HOLD_MS = 300;
 
 function computeThreshold(sensitivity) {
-  // sensitivity 0   → threshold 60 (strict — filters most sounds)
-  // sensitivity 50  → threshold ~13 (reasonable default)
-  // sensitivity 100 → threshold 2  (sensitive — passes most sounds)
   return Math.max(2, Math.round(60 * Math.pow(0.97, sensitivity)));
+}
+
+function resampleLinear(input, fromRate, toRate) {
+  if (fromRate === toRate) return input;
+  const ratio = fromRate / toRate;
+  const outLen = Math.round(input.length / ratio);
+  const output = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const srcIdx = i * ratio;
+    const idx0 = Math.floor(srcIdx);
+    const idx1 = Math.min(idx0 + 1, input.length - 1);
+    const frac = srcIdx - idx0;
+    output[i] = input[idx0] + (input[idx1] - input[idx0]) * frac;
+  }
+  return output;
 }
 
 // ── Hook ────────────────────────────────────────────────────────
@@ -79,9 +84,11 @@ export default function useVoice(channelId) {
   const channelIdRef = useRef(channelId);
   const playbackCtxRef = useRef(null);
   const isMutedRef = useRef(false);
-  const nextPlayTimeRef = useRef(new Map());
   const sensitivityRef = useRef(sensitivity);
   const lastSpeechTimeRef = useRef(0);
+  const playbackNodeRef = useRef(null);
+  const encoderRef = useRef(null);
+  const decodersRef = useRef(new Map());
 
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
@@ -113,56 +120,60 @@ export default function useVoice(channelId) {
 
     // ── Receive & play remote audio ──
 
-    function handleAudioChunk({ from, data, sampleRate }) {
-      const ctx = playbackCtxRef.current;
-      if (!ctx || ctx.state === 'closed') return;
-      if (ctx.state === 'suspended') ctx.resume();
+    function handleAudioChunk({ from, data, codec, seq, sampleRate }) {
+      const playNode = playbackNodeRef.current;
+      if (!playNode) return;
 
-      // Decode Int16 → Float32
-      const int16 = new Int16Array(data);
-      const float32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) {
-        float32[i] = int16[i] / 32768;
+      if (codec === 'opus' && typeof AudioDecoder !== 'undefined') {
+        let decoder = decodersRef.current.get(from);
+        if (!decoder) {
+          const playRate = playbackCtxRef.current?.sampleRate || 48000;
+          decoder = new AudioDecoder({
+            output: (audioData) => {
+              try {
+                let pcm = new Float32Array(audioData.numberOfFrames);
+                audioData.copyTo(pcm, { planeIndex: 0 });
+                audioData.close();
+                if (playRate !== 48000) {
+                  pcm = resampleLinear(pcm, 48000, playRate);
+                }
+                playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
+              } catch (e) {
+                console.error('[Voice] Decode output error:', e);
+              }
+            },
+            error: (e) => {
+              console.error('[Voice] Decoder error:', e);
+              decodersRef.current.delete(from);
+            },
+          });
+          decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 });
+          decodersRef.current.set(from, decoder);
+        }
+        try {
+          const chunk = new EncodedAudioChunk({
+            type: 'key',
+            timestamp: (seq || 0) * 20000,
+            data,
+          });
+          decoder.decode(chunk);
+        } catch (e) {
+          console.error('[Voice] Decode error:', e);
+        }
+      } else {
+        // PCM fallback
+        const int16 = new Int16Array(data);
+        let pcm = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) {
+          pcm[i] = int16[i] / 32768;
+        }
+        const playRate = playbackCtxRef.current?.sampleRate || 48000;
+        const srcRate = sampleRate || 48000;
+        if (srcRate !== playRate) {
+          pcm = resampleLinear(pcm, srcRate, playRate);
+        }
+        playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
       }
-
-      const rate = sampleRate || 48000;
-      const buffer = ctx.createBuffer(1, float32.length, rate);
-      buffer.getChannelData(0).set(float32);
-
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-
-      // Schedule with jitter absorption
-      const now = ctx.currentTime;
-      let t = nextPlayTimeRef.current.get(from);
-
-      if (t === undefined) {
-        t = now + JITTER_BUFFER_S;
-      } else if (t < now - 0.15) {
-        // Fallen too far behind — snap forward
-        t = now + 0.03;
-      }
-
-      const startTime = Math.max(t, now);
-
-      // Crossfade envelope — eliminates clicks at chunk boundaries.
-      // Adjacent chunks overlap by `fade` seconds. Linear fade-out of
-      // the old chunk + linear fade-in of the new chunk sums to unity
-      // at every point, so no volume dip.
-      const fade = CROSSFADE_S;
-      const gain = ctx.createGain();
-      gain.gain.setValueAtTime(0, startTime);
-      gain.gain.linearRampToValueAtTime(1, startTime + fade);
-      const endTime = startTime + buffer.duration;
-      gain.gain.setValueAtTime(1, endTime - fade);
-      gain.gain.linearRampToValueAtTime(0, endTime);
-
-      source.connect(gain);
-      gain.connect(ctx.destination);
-      source.start(startTime);
-
-      // Overlap next chunk by fade time for smooth crossfade
-      nextPlayTimeRef.current.set(from, startTime + buffer.duration - fade);
     }
 
     // ── Socket event handlers ──
@@ -175,7 +186,12 @@ export default function useVoice(channelId) {
     function handleUserLeft({ socketId }) {
       console.log(`[Voice] → user-left: ${socketId}`);
       playChime(playbackCtxRef, 'down');
-      nextPlayTimeRef.current.delete(socketId);
+      const decoder = decodersRef.current.get(socketId);
+      if (decoder) {
+        try { decoder.close(); } catch {}
+        decodersRef.current.delete(socketId);
+      }
+      playbackNodeRef.current?.port.postMessage({ removePeer: socketId });
       setSpeakingPeers((prev) => {
         const s = new Set(prev);
         s.delete(socketId);
@@ -197,10 +213,20 @@ export default function useVoice(channelId) {
     socket.on('voice:user-left', handleUserLeft);
     socket.on('voice:speaking', handleSpeaking);
 
-    // ── Init: acquire mic → build processing chain → join ──
+    // ── Init ──
 
     async function init() {
       try {
+        // ── Setup playback AudioWorklet ──
+        const playCtx = playbackCtxRef.current;
+        await playCtx.audioWorklet.addModule('/playback-processor.js');
+        const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor');
+        playbackNode.connect(playCtx.destination);
+        playbackNodeRef.current = playbackNode;
+
+        if (cancelled) return;
+
+        // ── Acquire mic ──
         if (!navigator.mediaDevices?.getUserMedia) {
           console.error('[Voice] getUserMedia not available');
           socket.emit('voice:join', { channelId });
@@ -209,36 +235,27 @@ export default function useVoice(channelId) {
 
         console.log('[Voice] Requesting microphone...');
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
 
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
-
         localStreamRef.current = stream;
 
-        // Use device default sample rate — forcing a rate causes
-        // ScriptProcessor to misbehave (pitch-shift bugs).
+        // ── Capture AudioContext (device default rate) ──
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const nativeRate = audioCtx.sampleRate;
         console.log('[Voice] AudioContext at', nativeRate, 'Hz');
         audioContextRef.current = audioCtx;
 
-        const micSource = audioCtx.createMediaStreamSource(stream);
+        // ── Load capture AudioWorklet ──
+        await audioCtx.audioWorklet.addModule('/capture-processor.js');
+        if (cancelled) return;
 
         // ── Voice processing chain ──
-        //
-        // mic → highPass(80Hz)  — removes rumble, AC hum, handling noise
-        //     → lowPass(12kHz)  — removes hiss, high-freq artifacts
-        //     → compressor      — evens out volume, prevents clipping
-        //     → analyser (VAD)
-        //     → scriptProcessor (capture + inline VAD gate)
+        const micSource = audioCtx.createMediaStreamSource(stream);
 
         const highPass = audioCtx.createBiquadFilter();
         highPass.type = 'highpass';
@@ -261,13 +278,20 @@ export default function useVoice(channelId) {
         analyser.fftSize = 1024;
         analyser.smoothingTimeConstant = 0.5;
 
-        // Wire the chain
+        const captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+
+        // Chain: mic → HP → LP → compressor → captureNode (pass-through) → analyser → silent output
         micSource.connect(highPass);
         highPass.connect(lowPass);
         lowPass.connect(compressor);
-        compressor.connect(analyser);
+        compressor.connect(captureNode);
+        captureNode.connect(analyser);
+        const silentGain = audioCtx.createGain();
+        silentGain.gain.value = 0.00001;
+        analyser.connect(silentGain);
+        silentGain.connect(audioCtx.destination);
 
-        // VAD interval — updates UI (speaking indicators, mic level)
+        // ── VAD (100ms interval for UI + gate timing) ──
         const vadData = new Uint8Array(analyser.frequencyBinCount);
         vadIntervalRef.current = setInterval(() => {
           analyser.getByteFrequencyData(vadData);
@@ -278,6 +302,9 @@ export default function useVoice(channelId) {
           const speaking = avg > threshold;
           setMicLevel(Math.min(100, Math.round((avg / 60) * 100)));
 
+          if (speaking) {
+            lastSpeechTimeRef.current = performance.now();
+          }
           if (speaking !== wasSpeakingRef.current) {
             wasSpeakingRef.current = speaking;
             setIsSpeaking(speaking);
@@ -288,64 +315,92 @@ export default function useVoice(channelId) {
           }
         }, 100);
 
-        // ── Audio capture with VAD noise gate ──
-        const processor = audioCtx.createScriptProcessor(CAPTURE_BUFFER, 1, 1);
-        const gateVadData = new Uint8Array(analyser.frequencyBinCount);
+        // ── Opus encoder (WebCodecs) ──
+        let useOpus = false;
+        let encoder = null;
+        let seqCounter = 0;
 
-        processor.onaudioprocess = (e) => {
+        if (typeof AudioEncoder !== 'undefined') {
+          try {
+            const config = {
+              codec: 'opus',
+              sampleRate: 48000,
+              numberOfChannels: 1,
+              bitrate: 32000,
+            };
+            const support = await AudioEncoder.isConfigSupported(config);
+            if (support.supported) {
+              useOpus = true;
+              encoder = new AudioEncoder({
+                output: (chunk) => {
+                  if (cancelled) return;
+                  const buf = new ArrayBuffer(chunk.byteLength);
+                  chunk.copyTo(buf);
+                  socket.volatile.emit('audio:chunk', {
+                    channelId: channelIdRef.current,
+                    data: buf,
+                    codec: 'opus',
+                    seq: seqCounter++,
+                  });
+                },
+                error: (e) => {
+                  console.error('[Voice] Encoder error:', e);
+                  useOpus = false;
+                },
+              });
+              encoder.configure(config);
+              encoderRef.current = encoder;
+              console.log('[Voice] Opus encoder ready');
+            }
+          } catch (e) {
+            console.warn('[Voice] Opus not available, using PCM:', e.message);
+          }
+        }
+
+        // ── Handle frames from capture worklet ──
+        let frameTimestamp = 0;
+
+        captureNode.port.onmessage = (e) => {
           if (isMutedRef.current || cancelled) return;
+          const { pcm } = e.data;
 
-          const input = e.inputBuffer.getChannelData(0);
-
-          // Skip true silence (saves CPU on the gate check)
-          let peak = 0;
-          for (let i = 0; i < input.length; i++) {
-            const a = Math.abs(input[i]);
-            if (a > peak) peak = a;
-          }
-          if (peak < 0.001) return;
-
-          // ── VAD noise gate ──
-          // Uses spectral analysis (not just amplitude) so it
-          // distinguishes speech from keyboard clicks / mouse noise.
-          analyser.getByteFrequencyData(gateVadData);
-          let sum = 0;
-          for (let i = 0; i < gateVadData.length; i++) sum += gateVadData[i];
-          const avg = sum / gateVadData.length;
-
-          const threshold = computeThreshold(sensitivityRef.current);
-          if (avg > threshold) {
-            lastSpeechTimeRef.current = performance.now();
-          }
-
-          // Gate closed — no speech detected recently
+          // VAD gate
           if (performance.now() - lastSpeechTimeRef.current > GATE_HOLD_MS) return;
 
-          // Encode Float32 → Int16 at native rate (no resampling)
-          const int16 = new Int16Array(input.length);
-          for (let i = 0; i < input.length; i++) {
-            int16[i] = Math.max(-32768, Math.min(32767, (input[i] * 32767) | 0));
+          if (useOpus && encoder && encoder.state === 'configured') {
+            try {
+              const audioData = new AudioData({
+                format: 'f32-planar',
+                sampleRate: nativeRate,
+                numberOfFrames: pcm.length,
+                numberOfChannels: 1,
+                timestamp: frameTimestamp,
+                data: pcm,
+              });
+              encoder.encode(audioData);
+              audioData.close();
+              frameTimestamp += 20000;
+            } catch (e) {
+              console.error('[Voice] Encode error:', e);
+            }
+          } else {
+            // PCM fallback
+            const int16 = new Int16Array(pcm.length);
+            for (let i = 0; i < pcm.length; i++) {
+              int16[i] = Math.max(-32768, Math.min(32767, (pcm[i] * 32767) | 0));
+            }
+            socket.volatile.emit('audio:chunk', {
+              channelId: channelIdRef.current,
+              data: int16.buffer,
+              sampleRate: nativeRate,
+            });
           }
-
-          socket.volatile.emit('audio:chunk', {
-            channelId: channelIdRef.current,
-            data: int16.buffer,
-            sampleRate: nativeRate,
-          });
         };
-
-        // Connect processor (needs a connected output to fire)
-        compressor.connect(processor);
-        const silentGain = audioCtx.createGain();
-        silentGain.gain.value = 0;
-        processor.connect(silentGain);
-        silentGain.connect(audioCtx.destination);
       } catch (err) {
-        console.error('[Voice] Mic error:', err);
+        console.error('[Voice] Init error:', err);
       }
 
       if (cancelled) return;
-
       console.log('[Voice] Joining', channelId);
       socket.emit('voice:join', { channelId });
     }
@@ -353,7 +408,6 @@ export default function useVoice(channelId) {
     init();
 
     // ── Cleanup ──
-
     return () => {
       cancelled = true;
 
@@ -365,6 +419,20 @@ export default function useVoice(channelId) {
       playChime(playbackCtxRef, 'down');
       socket.emit('voice:leave', { channelId });
 
+      if (encoderRef.current) {
+        try { encoderRef.current.close(); } catch {}
+        encoderRef.current = null;
+      }
+      for (const decoder of decodersRef.current.values()) {
+        try { decoder.close(); } catch {}
+      }
+      decodersRef.current.clear();
+
+      if (playbackNodeRef.current) {
+        playbackNodeRef.current.port.postMessage({ clear: true });
+        playbackNodeRef.current.disconnect();
+        playbackNodeRef.current = null;
+      }
       if (vadIntervalRef.current) clearInterval(vadIntervalRef.current);
       if (loopbackRef.current) {
         loopbackRef.current.disconnect();
@@ -376,7 +444,6 @@ export default function useVoice(channelId) {
         localStreamRef.current = null;
       }
 
-      nextPlayTimeRef.current.clear();
       wasSpeakingRef.current = false;
       lastSpeechTimeRef.current = 0;
       setSpeakingPeers(new Set());
@@ -403,15 +470,12 @@ export default function useVoice(channelId) {
 
   const toggleTest = useCallback(() => {
     if (!audioContextRef.current || !localStreamRef.current) return;
-
     if (loopbackRef.current) {
       loopbackRef.current.disconnect();
       loopbackRef.current = null;
       setTesting(false);
     } else {
-      const source = audioContextRef.current.createMediaStreamSource(
-        localStreamRef.current
-      );
+      const source = audioContextRef.current.createMediaStreamSource(localStreamRef.current);
       const delay = audioContextRef.current.createDelay();
       delay.delayTime.value = 0.1;
       source.connect(delay);
