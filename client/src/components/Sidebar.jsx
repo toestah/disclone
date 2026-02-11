@@ -1,3 +1,5 @@
+import { useState, useRef, useEffect } from 'react';
+
 export default function Sidebar({
   channels,
   activeChannel,
@@ -7,121 +9,258 @@ export default function Sidebar({
   onVoiceJoin,
   onVoiceLeave,
   user,
+  voiceState,
+  voiceChannelName,
 }) {
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
 
+  const { isMuted, isSpeaking, speakingPeers, toggleMute, micLevel, sensitivity, setSensitivity } = voiceState || {};
+
+  const [showSettings, setShowSettings] = useState(false);
+  const settingsRef = useRef(null);
+
+  // Close settings popover on click outside
+  useEffect(() => {
+    if (!showSettings) return;
+    function handleClick(e) {
+      if (settingsRef.current && !settingsRef.current.contains(e.target)) {
+        setShowSettings(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showSettings]);
+
   return (
     <div className="w-60 bg-discord-darker flex flex-col h-full flex-shrink-0">
       {/* Server header */}
-      <div className="h-12 px-4 flex items-center shadow-md border-b border-black/30">
-        <h2 className="font-bold text-white truncate">Disclone</h2>
+      <div className="h-12 px-4 flex items-center border-b border-black/40 hover:bg-discord-hover transition-colors cursor-pointer">
+        <h2 className="font-bold text-white truncate tracking-tight">Disclone</h2>
       </div>
 
       {/* Channel list */}
-      <div className="flex-1 overflow-y-auto py-3 px-2">
+      <div className="flex-1 overflow-y-auto pt-3 px-2">
         {/* Text channels */}
-        <div className="text-xs font-semibold text-discord-muted uppercase px-2 mb-1">
-          Text Channels
+        <div className="px-1.5 mb-1 mt-2">
+          <span className="text-[11px] font-bold text-discord-muted uppercase tracking-wide">
+            Text Channels
+          </span>
         </div>
-        {textChannels.map((channel) => (
-          <button
-            key={channel.id}
-            onClick={() => onChannelSelect(channel.id)}
-            className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-1.5 mb-0.5 transition-colors ${
-              activeChannel === channel.id
-                ? 'bg-white/10 text-white'
-                : 'text-discord-muted hover:bg-white/5 hover:text-discord-text'
-            }`}
-          >
-            <span className="text-lg leading-none opacity-70">#</span>
-            <span className="text-sm">{channel.name}</span>
-          </button>
-        ))}
+        <div className="space-y-px mb-4">
+          {textChannels.map((channel) => (
+            <button
+              key={channel.id}
+              onClick={() => onChannelSelect(channel.id)}
+              className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
+                activeChannel === channel.id
+                  ? 'bg-discord-active text-white'
+                  : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+              }`}
+            >
+              <span className={`text-lg leading-none font-light ${activeChannel === channel.id ? 'text-white/70' : 'text-discord-muted/50'}`}>#</span>
+              <span className="text-[15px] font-medium">{channel.name}</span>
+            </button>
+          ))}
+        </div>
 
         {/* Voice channels */}
-        <div className="text-xs font-semibold text-discord-muted uppercase px-2 mt-4 mb-1">
-          Voice Channels
+        <div className="px-1.5 mb-1">
+          <span className="text-[11px] font-bold text-discord-muted uppercase tracking-wide">
+            Voice Channels
+          </span>
         </div>
-        {voiceChannels.map((channel) => {
-          const members = voiceMembers.get(channel.id) || [];
-          const isJoined = voiceChannel === channel.id;
-          return (
-            <div key={channel.id} className="mb-1">
-              <button
-                onClick={() =>
-                  isJoined ? onVoiceLeave() : onVoiceJoin(channel.id)
-                }
-                className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-1.5 transition-colors ${
-                  isJoined
-                    ? 'bg-white/10 text-discord-green'
-                    : 'text-discord-muted hover:bg-white/5 hover:text-discord-text'
-                }`}
-              >
-                <svg
-                  className="w-5 h-5 flex-shrink-0"
-                  viewBox="0 0 24 24"
-                  fill="currentColor"
+        <div className="space-y-px">
+          {voiceChannels.map((channel) => {
+            const members = voiceMembers.get(channel.id) || [];
+            const isJoined = voiceChannel === channel.id;
+            return (
+              <div key={channel.id}>
+                <button
+                  onClick={() =>
+                    isJoined ? onVoiceLeave() : onVoiceJoin(channel.id)
+                  }
+                  className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
+                    isJoined
+                      ? 'bg-discord-active text-white'
+                      : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+                  }`}
                 >
-                  <path d="M12 3a1 1 0 0 0-1.707-.707L5.586 7H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h1.586l4.707 4.707A1 1 0 0 0 12 21V3z" />
-                </svg>
-                <span className="text-sm">{channel.name}</span>
+                  <svg
+                    className={`w-5 h-5 flex-shrink-0 ${isJoined ? 'text-discord-green' : 'text-discord-muted/50 group-hover:text-discord-muted'}`}
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <path d="M12 3a1 1 0 0 0-1.707-.707L5.586 7H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h1.586l4.707 4.707A1 1 0 0 0 12 21V3z" />
+                  </svg>
+                  <span className="text-[15px] font-medium">{channel.name}</span>
+                  {members.length > 0 && (
+                    <span className="ml-auto text-[11px] text-discord-muted bg-discord-dark/40 px-1.5 py-0.5 rounded-full font-medium">
+                      {members.length}
+                    </span>
+                  )}
+                </button>
                 {members.length > 0 && (
-                  <span className="ml-auto text-xs text-discord-muted">
-                    {members.length}
-                  </span>
+                  <div className="ml-3 pl-3 py-1 space-y-px border-l-2 border-discord-border/30">
+                    {members.map((member) => {
+                      const isSelf = member.username === user.username;
+                      const memberSpeaking = isJoined
+                        ? isSelf
+                          ? isSpeaking
+                          : speakingPeers?.has(member.socketId) || member.speaking
+                        : false;
+                      return (
+                        <div
+                          key={member.socketId}
+                          className="flex items-center gap-2.5 py-1 px-1.5 rounded hover:bg-discord-hover/40 transition-colors"
+                        >
+                          <div
+                            className={`w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-white text-[10px] font-bold transition-shadow duration-200 ${
+                              memberSpeaking ? 'speaking-glow' : ''
+                            }`}
+                            style={{ backgroundColor: member.avatarColor }}
+                          >
+                            {member.username[0].toUpperCase()}
+                          </div>
+                          <span className={`text-[13px] truncate ${isSelf ? 'text-white font-medium' : 'text-discord-muted'}`}>
+                            {member.username}
+                          </span>
+                          {((isSelf && isMuted) || member.muted) && (
+                            <svg className="w-3.5 h-3.5 text-discord-red flex-shrink-0 ml-auto" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z" />
+                            </svg>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
-              </button>
-              {members.length > 0 && (
-                <div className="pl-8 py-1 space-y-1">
-                  {members.map((member) => (
-                    <div
-                      key={member.socketId}
-                      className="flex items-center gap-2 text-xs text-discord-muted"
-                    >
-                      <div
-                        className="w-5 h-5 rounded-full flex-shrink-0"
-                        style={{ backgroundColor: member.avatarColor }}
-                      />
-                      <span className="truncate">{member.username}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
-      {/* User bar */}
-      <div className="h-14 bg-discord-dark/50 px-2 flex items-center gap-2 border-t border-black/30">
-        <div
-          className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-          style={{ backgroundColor: user.avatarColor }}
-        >
-          {user.username[0].toUpperCase()}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold text-white truncate">
-            {user.username}
+      {/* Voice connection panel — shown when in a voice channel */}
+      {voiceChannel && (
+        <div className="px-2 py-2 bg-discord-dark/60 border-t border-black/30">
+          <div className="flex items-center gap-2 px-1.5 mb-2">
+            <svg className="w-4 h-4 text-discord-green flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 3a1 1 0 0 0-1.707-.707L5.586 7H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h1.586l4.707 4.707A1 1 0 0 0 12 21V3z" />
+            </svg>
+            <div className="flex-1 min-w-0">
+              <div className="text-[12px] font-semibold text-discord-green leading-tight">Voice Connected</div>
+              <div className="text-[11px] text-discord-muted truncate leading-tight mt-0.5">{voiceChannelName || 'Voice Chat'}</div>
+            </div>
           </div>
-          <div className="text-xs text-discord-green">Online</div>
-        </div>
-        {voiceChannel && (
-          <button
-            onClick={onVoiceLeave}
-            className="text-discord-red hover:text-white transition-colors p-1"
-            title="Disconnect from voice"
-          >
-            <svg
-              className="w-5 h-5"
-              viewBox="0 0 24 24"
-              fill="currentColor"
+          <div className="flex items-center gap-1 px-1">
+            <button
+              onClick={toggleMute}
+              className={`flex-1 flex items-center justify-center p-1.5 rounded transition-colors ${
+                isMuted
+                  ? 'bg-discord-red/20 text-discord-red hover:bg-discord-red/30'
+                  : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+              }`}
+              title={isMuted ? 'Unmute' : 'Mute'}
             >
-              <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 0 0-2.67-1.85.996.996 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
+              <svg className="w-4.5 h-4.5" viewBox="0 0 24 24" fill="currentColor">
+                {isMuted ? (
+                  <path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z" />
+                ) : (
+                  <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z" />
+                )}
+              </svg>
+            </button>
+            <button
+              onClick={onVoiceLeave}
+              className="flex-1 flex items-center justify-center p-1.5 rounded text-discord-muted hover:bg-discord-red/20 hover:text-discord-red transition-colors"
+              title="Disconnect"
+            >
+              <svg className="w-4.5 h-4.5" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 0 0-2.67-1.85.996.996 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* User bar */}
+      <div className="relative px-2 py-2 bg-discord-dark/80 border-t border-black/40" ref={settingsRef}>
+        {/* Settings popover */}
+        {showSettings && (
+          <div className="absolute bottom-full left-2 right-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 p-3 z-50">
+            <div className="text-[11px] font-bold text-discord-muted uppercase tracking-wide mb-3">
+              Voice Settings
+            </div>
+
+            <div className="mb-1">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-[12px] text-discord-text">Input Sensitivity</label>
+                <span className="text-[11px] text-discord-muted tabular-nums">{sensitivity ?? 50}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={sensitivity ?? 50}
+                onChange={(e) => setSensitivity?.(Number(e.target.value))}
+                className="voice-slider w-full"
+              />
+            </div>
+
+            {/* Mic level indicator — only shown when in voice */}
+            {voiceChannel && (
+              <div className="mt-2.5">
+                <div className="text-[11px] text-discord-muted mb-1">Mic Level</div>
+                <div className="h-2 bg-discord-darker rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-75 ${
+                      isSpeaking ? 'bg-discord-green' : 'bg-discord-muted/40'
+                    }`}
+                    style={{ width: `${micLevel || 0}%` }}
+                  />
+                </div>
+                <div className="flex justify-between mt-1">
+                  <span className="text-[10px] text-discord-muted/60">Quiet</span>
+                  <span className={`text-[10px] ${isSpeaking ? 'text-discord-green' : 'text-discord-muted/60'}`}>
+                    {isSpeaking ? 'Transmitting' : 'Gate closed'}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2.5 px-1.5 py-1 rounded hover:bg-discord-hover/50 transition-colors">
+          <div className="relative flex-shrink-0">
+            <div
+              className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold"
+              style={{ backgroundColor: user.avatarColor }}
+            >
+              {user.username[0].toUpperCase()}
+            </div>
+            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-discord-green rounded-full border-2 border-discord-dark" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] font-semibold text-white truncate leading-tight">
+              {user.username}
+            </div>
+            <div className="text-[11px] text-discord-green leading-tight mt-0.5">Online</div>
+          </div>
+          <button
+            onClick={() => setShowSettings((s) => !s)}
+            className={`p-1.5 rounded transition-colors flex-shrink-0 ${
+              showSettings
+                ? 'text-white bg-discord-active'
+                : 'text-discord-muted hover:text-discord-text hover:bg-discord-hover'
+            }`}
+            title="Voice Settings"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" />
             </svg>
           </button>
-        )}
+        </div>
       </div>
     </div>
   );

@@ -6,22 +6,22 @@ export default function UserAvatar({
   isMuted,
   small,
 }) {
-  const size = small ? 'w-10 h-10 text-sm' : 'w-16 h-16 text-xl';
-  const badgeSize = small ? 'w-2 h-2' : 'w-3 h-3';
+  const size = small ? 'w-9 h-9 text-sm' : 'w-14 h-14 text-lg';
+  const badgeSize = small ? 'w-2.5 h-2.5' : 'w-3 h-3';
 
   return (
     <div className="flex flex-col items-center gap-1">
       <div className="relative">
         <div
-          className={`${size} rounded-full flex items-center justify-center text-white font-bold transition-shadow duration-200 ${
-            speaking ? 'speaking-glow' : ''
+          className={`${size} rounded-full flex items-center justify-center text-white font-bold transition-all duration-200 ${
+            speaking ? 'speaking-glow' : 'ring-2 ring-transparent'
           }`}
           style={{ backgroundColor: avatarColor }}
         >
           {username[0].toUpperCase()}
         </div>
         {isMuted && (
-          <div className="absolute -bottom-1 -right-1 bg-discord-red rounded-full p-0.5">
+          <div className="absolute -bottom-0.5 -right-0.5 bg-discord-red rounded-full p-[2px] border-2 border-discord-chat">
             <svg
               className={`${badgeSize} text-white`}
               viewBox="0 0 24 24"
@@ -33,7 +33,7 @@ export default function UserAvatar({
         )}
       </div>
       <span
-        className={`text-xs ${isSelf ? 'text-white font-semibold' : 'text-discord-text'}`}
+        className={`text-[11px] leading-tight max-w-[72px] truncate ${isSelf ? 'text-white font-semibold' : 'text-discord-muted'}`}
       >
         {username}
         {isSelf && ' (you)'}

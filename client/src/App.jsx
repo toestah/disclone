@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { SocketProvider, useSocket } from './hooks/useSocket.jsx';
+import useVoice from './hooks/useVoice.js';
 import LoginScreen from './components/LoginScreen.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import TextChannel from './components/TextChannel.jsx';
-import VoiceChannel from './components/VoiceChannel.jsx';
 import MemberList from './components/MemberList.jsx';
 
 function AppContent() {
@@ -31,6 +31,16 @@ function AppContent() {
           if (response.success) {
             setUser(response.user);
             setChannels(response.channels);
+            // Load initial voice room state
+            if (response.voiceState) {
+              setVoiceMembers((prev) => {
+                const next = new Map(prev);
+                for (const [roomId, members] of Object.entries(response.voiceState)) {
+                  next.set(roomId, members);
+                }
+                return next;
+              });
+            }
             socket.emit('channel:join', { channelId: 'general' }, (res) => {
               if (res?.success) {
                 setMessages((prev) => {
@@ -94,6 +104,16 @@ function AppContent() {
             'disclone_session',
             JSON.stringify({ username: response.user.username, password: password || null })
           );
+          // Load initial voice room state
+          if (response.voiceState) {
+            setVoiceMembers((prev) => {
+              const next = new Map(prev);
+              for (const [roomId, members] of Object.entries(response.voiceState)) {
+                next.set(roomId, members);
+              }
+              return next;
+            });
+          }
           socket.emit('channel:join', { channelId: 'general' }, (res) => {
             if (res?.success) {
               setMessages((prev) => {
@@ -139,6 +159,8 @@ function AppContent() {
     [socket, activeChannel]
   );
 
+  const voiceState = useVoice(voiceChannel);
+
   const handleVoiceJoin = useCallback(
     (channelId) => {
       setVoiceChannel(channelId);
@@ -176,6 +198,8 @@ function AppContent() {
         onVoiceJoin={handleVoiceJoin}
         onVoiceLeave={handleVoiceLeave}
         user={user}
+        voiceState={voiceState}
+        voiceChannelName={voiceChannelInfo?.name}
       />
       <main className="flex-1 flex flex-col bg-discord-chat min-w-0">
         {currentChannel?.type === 'text' && (
@@ -183,15 +207,6 @@ function AppContent() {
             channel={currentChannel}
             messages={messages.get(activeChannel) || []}
             onSendMessage={handleSendMessage}
-            user={user}
-          />
-        )}
-        {voiceChannel && (
-          <VoiceChannel
-            channelId={voiceChannel}
-            channelName={voiceChannelInfo?.name || 'Voice Chat'}
-            members={voiceMembers.get(voiceChannel) || []}
-            onLeave={handleVoiceLeave}
             user={user}
           />
         )}

@@ -12,7 +12,19 @@ app.use(cors());
 
 // In production, serve the built client files
 const clientDist = resolve(__dirname, '../client/dist');
-app.use(express.static(clientDist));
+
+// Hashed assets (js/css) can be cached forever; index.html must not be cached
+app.use('/assets', express.static(resolve(clientDist, 'assets'), {
+  maxAge: '1y',
+  immutable: true,
+}));
+app.use(express.static(clientDist, {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    }
+  },
+}));
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -49,6 +61,9 @@ voiceRooms.set('voice-chat-2', new Set());
 
 // Speaking state: socketId -> boolean
 const speakingState = new Map();
+
+// Muted state: socketId -> boolean
+const mutedState = new Map();
 
 let messageIdCounter = 0;
 
@@ -89,6 +104,7 @@ function getVoiceRoomMembers(channelId) {
         username: session.username,
         avatarColor: session.avatarColor,
         speaking: speakingState.get(socketId) || false,
+        muted: mutedState.get(socketId) || false,
       });
     }
   }
@@ -144,10 +160,19 @@ io.on('connection', (socket) => {
     socket.join('general');
     io.emit('users:update', getOnlineUsers());
 
+    // Build current voice room state so new user sees who's in voice
+    const voiceState = {};
+    for (const [roomId, room] of voiceRooms) {
+      if (room.size > 0) {
+        voiceState[roomId] = getVoiceRoomMembers(roomId);
+      }
+    }
+
     callback({
       success: true,
       user: { username: trimmed, avatarColor },
       channels,
+      voiceState,
     });
   });
 
@@ -203,6 +228,7 @@ io.on('connection', (socket) => {
   socket.on('voice:join', ({ channelId }, callback) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
+    console.log(`[Voice] ${session.username} (${socket.id}) joining ${channelId}`);
 
     const channel = channels.find((c) => c.id === channelId && c.type === 'voice');
     if (!channel) return callback?.({ success: false, error: 'Voice channel not found' });
@@ -244,6 +270,7 @@ io.on('connection', (socket) => {
     }
 
     // Notify existing peers
+    console.log(`[Voice] Notifying ${existingPeers.length} existing peer(s) about ${session.username}`);
     socket.to(`voice:${channelId}`).emit('voice:user-joined', {
       channelId,
       socketId: socket.id,
@@ -269,6 +296,7 @@ io.on('connection', (socket) => {
       room.delete(socket.id);
       socket.leave(`voice:${channelId}`);
       speakingState.delete(socket.id);
+      mutedState.delete(socket.id);
 
       socket.to(`voice:${channelId}`).emit('voice:user-left', {
         channelId,
@@ -283,7 +311,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Voice Speaking State ──
+  // ── Voice Speaking / Muted State ──
 
   socket.on('voice:speaking', ({ channelId, speaking }) => {
     speakingState.set(socket.id, speaking);
@@ -293,18 +321,27 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ── WebRTC Signaling ──
-
-  socket.on('webrtc:offer', ({ to, signal }) => {
-    io.to(to).emit('webrtc:offer', { from: socket.id, signal });
+  socket.on('voice:muted', ({ channelId, muted }) => {
+    mutedState.set(socket.id, muted);
+    // Broadcast updated room members (includes muted state)
+    io.emit('voice:room-update', {
+      channelId,
+      members: getVoiceRoomMembers(channelId),
+    });
   });
 
-  socket.on('webrtc:answer', ({ to, signal }) => {
-    io.to(to).emit('webrtc:answer', { from: socket.id, signal });
-  });
+  // ── Server-relayed audio ──
 
-  socket.on('webrtc:ice-candidate', ({ to, signal }) => {
-    io.to(to).emit('webrtc:ice-candidate', { from: socket.id, signal });
+  socket.on('audio:chunk', ({ channelId, data, sampleRate }) => {
+    // Only relay if sender is actually in this voice room
+    const room = voiceRooms.get(channelId);
+    if (!room || !room.has(socket.id)) return;
+    // volatile = OK to drop if transport is congested (real-time audio)
+    socket.to(`voice:${channelId}`).volatile.emit('audio:chunk', {
+      from: socket.id,
+      data,
+      sampleRate,
+    });
   });
 
   // ── Disconnect ──
@@ -330,6 +367,7 @@ io.on('connection', (socket) => {
     }
 
     speakingState.delete(socket.id);
+    mutedState.delete(socket.id);
     activeSessions.delete(socket.id);
     io.emit('users:update', getOnlineUsers());
   });
@@ -339,6 +377,7 @@ io.on('connection', (socket) => {
 
 // SPA fallback — serve index.html for any non-API/non-static route
 app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(resolve(clientDist, 'index.html'));
 });
 

@@ -1,53 +1,101 @@
 @import "tailwindcss";
 
 @theme {
-  --color-discord-dark: #202225;
-  --color-discord-darker: #2f3136;
-  --color-discord-chat: #36393f;
-  --color-discord-input: #40444b;
-  --color-discord-text: #dcddde;
-  --color-discord-muted: #72767d;
+  --color-discord-dark: #1e1f22;
+  --color-discord-darker: #2b2d31;
+  --color-discord-chat: #313338;
+  --color-discord-input: #383a40;
+  --color-discord-text: #dbdee1;
+  --color-discord-muted: #949ba4;
   --color-discord-accent: #5865f2;
-  --color-discord-green: #3ba55c;
-  --color-discord-red: #ed4245;
+  --color-discord-green: #23a55a;
+  --color-discord-red: #f23f42;
+  --color-discord-yellow: #f0b232;
+  --color-discord-hover: #35373c;
+  --color-discord-active: #404249;
+  --color-discord-border: #3f4147;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* Tailwind's Preflight (in @layer base) already resets margin/padding/box-sizing.
+   Do NOT add an unlayered * reset — it overrides all Tailwind utility classes. */
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: #313338;
 }
 
+/* Speaking glow animation */
 @keyframes speaking-pulse {
   0%, 100% {
-    box-shadow: 0 0 0 3px #3ba55c, 0 0 10px rgba(59, 165, 92, 0.5);
+    box-shadow: 0 0 0 2px #23a55a, 0 0 8px rgba(35, 165, 90, 0.4);
   }
   50% {
-    box-shadow: 0 0 0 5px #3ba55c, 0 0 20px rgba(59, 165, 92, 0.7);
+    box-shadow: 0 0 0 4px #23a55a, 0 0 16px rgba(35, 165, 90, 0.6);
   }
 }
 
 .speaking-glow {
-  animation: speaking-pulse 1.5s ease-in-out infinite;
+  animation: speaking-pulse 1.2s ease-in-out infinite;
 }
 
+/* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+  margin: 4px 0;
 }
 ::-webkit-scrollbar-thumb {
-  background: #202225;
-  border-radius: 4px;
+  background: #1e1f22;
+  border-radius: 100px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #36393f;
+  background: #1a1b1e;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #1e1f22 transparent;
+}
+
+/* Voice settings slider */
+.voice-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: #1e1f22;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+.voice-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.voice-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Selection */
+::selection {
+  background-color: rgba(88, 101, 242, 0.3);
 }
