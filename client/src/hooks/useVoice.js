@@ -61,6 +61,18 @@ function resampleLinear(input, fromRate, toRate) {
   return output;
 }
 
+function resampleStereo(left, right, fromRate, toRate) {
+  return {
+    left: resampleLinear(left, fromRate, toRate),
+    right: resampleLinear(right, fromRate, toRate),
+  };
+}
+
+const sharingSupported = typeof navigator !== 'undefined' &&
+  !!navigator.mediaDevices?.getDisplayMedia &&
+  typeof AudioEncoder !== 'undefined' &&
+  typeof AudioDecoder !== 'undefined';
+
 // ── Hook ────────────────────────────────────────────────────────
 
 export default function useVoice(channelId) {
@@ -74,6 +86,12 @@ export default function useVoice(channelId) {
   const [sensitivity, setSensitivityState] = useState(() => {
     const saved = localStorage.getItem('disclone_voice_sensitivity');
     return saved !== null ? Number(saved) : 50;
+  });
+  const [isSharing, setIsSharing] = useState(false);
+  const [sharingUser, setSharingUser] = useState(null);
+  const [musicVolume, setMusicVolumeState] = useState(() => {
+    const saved = localStorage.getItem('disclone_music_volume');
+    return saved !== null ? Number(saved) : 80;
   });
 
   const localStreamRef = useRef(null);
@@ -90,10 +108,19 @@ export default function useVoice(channelId) {
   const encoderRef = useRef(null);
   const decodersRef = useRef(new Map());
   const peerCapsRef = useRef(new Map());
+  const musicStreamRef = useRef(null);
+  const musicContextRef = useRef(null);
+  const musicEncoderRef = useRef(null);
+  const musicDecoderRef = useRef(null);
+  const musicPlaybackNodeRef = useRef(null);
+  const musicGainNodeRef = useRef(null);
+  const isSharingRef = useRef(false);
+  const stopSharingRef = useRef(null);
 
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
   sensitivityRef.current = sensitivity;
+  isSharingRef.current = isSharing;
 
   const setSensitivity = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
@@ -213,10 +240,81 @@ export default function useVoice(channelId) {
       });
     }
 
+    // ── Music sharing event handlers ──
+
+    function handleMusicStarted({ socketId, username }) {
+      setSharingUser({ socketId, username });
+    }
+
+    function handleMusicStopped() {
+      setSharingUser(null);
+      // Clear music playback buffer
+      musicPlaybackNodeRef.current?.port.postMessage({ clear: true });
+      // Close music decoder
+      if (musicDecoderRef.current) {
+        try { musicDecoderRef.current.close(); } catch { /* ignore */ }
+        musicDecoderRef.current = null;
+      }
+    }
+
+    function handleMusicChunk({ data, seq }) {
+      const musicNode = musicPlaybackNodeRef.current;
+      if (!musicNode) return;
+
+      // Get or create stereo Opus decoder for music
+      let decoder = musicDecoderRef.current;
+      if (!decoder) {
+        const playRate = playbackCtxRef.current?.sampleRate || 48000;
+        decoder = new AudioDecoder({
+          output: (audioData) => {
+            try {
+              const frames = audioData.numberOfFrames;
+              let left = new Float32Array(frames);
+              let right = new Float32Array(frames);
+              audioData.copyTo(left, { planeIndex: 0 });
+              if (audioData.numberOfChannels >= 2) {
+                audioData.copyTo(right, { planeIndex: 1 });
+              } else {
+                right.set(left);
+              }
+              audioData.close();
+              if (playRate !== 48000) {
+                const resampled = resampleStereo(left, right, 48000, playRate);
+                left = resampled.left;
+                right = resampled.right;
+              }
+              musicNode.port.postMessage({ left, right }, [left.buffer, right.buffer]);
+            } catch (e) {
+              console.error('[Music] Decode output error:', e);
+            }
+          },
+          error: (e) => {
+            console.error('[Music] Decoder error:', e);
+            musicDecoderRef.current = null;
+          },
+        });
+        decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+        musicDecoderRef.current = decoder;
+      }
+      try {
+        const chunk = new EncodedAudioChunk({
+          type: 'key',
+          timestamp: (seq || 0) * 20000,
+          data,
+        });
+        decoder.decode(chunk);
+      } catch (e) {
+        console.error('[Music] Decode error:', e);
+      }
+    }
+
     socket.on('audio:chunk', handleAudioChunk);
     socket.on('voice:user-joined', handleUserJoined);
     socket.on('voice:user-left', handleUserLeft);
     socket.on('voice:speaking', handleSpeaking);
+    socket.on('music:started', handleMusicStarted);
+    socket.on('music:stopped', handleMusicStopped);
+    socket.on('music:chunk', handleMusicChunk);
 
     // ── Init ──
 
@@ -228,6 +326,19 @@ export default function useVoice(channelId) {
         const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor');
         playbackNode.connect(playCtx.destination);
         playbackNodeRef.current = playbackNode;
+
+        // ── Setup music playback AudioWorklet ──
+        await playCtx.audioWorklet.addModule('/music-playback-processor.js');
+        const musicPlaybackNode = new AudioWorkletNode(playCtx, 'music-playback-processor', {
+          outputChannelCount: [2],
+        });
+        const musicGain = playCtx.createGain();
+        const savedVol = localStorage.getItem('disclone_music_volume');
+        musicGain.gain.value = (savedVol !== null ? Number(savedVol) : 80) / 100;
+        musicPlaybackNode.connect(musicGain);
+        musicGain.connect(playCtx.destination);
+        musicPlaybackNodeRef.current = musicPlaybackNode;
+        musicGainNodeRef.current = musicGain;
 
         if (cancelled) return;
 
@@ -469,6 +580,42 @@ export default function useVoice(channelId) {
       socket.off('voice:user-joined', handleUserJoined);
       socket.off('voice:user-left', handleUserLeft);
       socket.off('voice:speaking', handleSpeaking);
+      socket.off('music:started', handleMusicStarted);
+      socket.off('music:stopped', handleMusicStopped);
+      socket.off('music:chunk', handleMusicChunk);
+
+      // Clean up music sharing if active
+      if (isSharingRef.current) {
+        socket.emit('music:stop', { channelId });
+        setIsSharing(false);
+        isSharingRef.current = false;
+      }
+      if (musicEncoderRef.current) {
+        try { musicEncoderRef.current.close(); } catch { /* ignore */ }
+        musicEncoderRef.current = null;
+      }
+      if (musicContextRef.current) {
+        try { musicContextRef.current.close(); } catch { /* ignore */ }
+        musicContextRef.current = null;
+      }
+      if (musicStreamRef.current) {
+        musicStreamRef.current.getTracks().forEach((t) => t.stop());
+        musicStreamRef.current = null;
+      }
+      if (musicDecoderRef.current) {
+        try { musicDecoderRef.current.close(); } catch { /* ignore */ }
+        musicDecoderRef.current = null;
+      }
+      if (musicPlaybackNodeRef.current) {
+        musicPlaybackNodeRef.current.port.postMessage({ clear: true });
+        musicPlaybackNodeRef.current.disconnect();
+        musicPlaybackNodeRef.current = null;
+      }
+      if (musicGainNodeRef.current) {
+        musicGainNodeRef.current.disconnect();
+        musicGainNodeRef.current = null;
+      }
+      setSharingUser(null);
 
       playChime(playbackCtxRef, 'down');
       socket.emit('voice:leave', { channelId });
@@ -540,6 +687,158 @@ export default function useVoice(channelId) {
     }
   }, []);
 
+  const startSharing = useCallback(async () => {
+    if (!socket || !channelIdRef.current || isSharingRef.current) return;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+    } catch (err) {
+      // User cancelled the picker — silently return
+      if (err.name === 'NotAllowedError') return;
+      console.error('[Music] getDisplayMedia error:', err);
+      return;
+    }
+
+    // Discard video track immediately
+    for (const track of stream.getVideoTracks()) {
+      track.stop();
+    }
+
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      alert('The selected source has no audio. Please share a tab or window with audio.');
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
+    try {
+      const musicCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      musicContextRef.current = musicCtx;
+
+      await musicCtx.audioWorklet.addModule('/music-capture-processor.js');
+      const captureNode = new AudioWorkletNode(musicCtx, 'music-capture-processor', {
+        outputChannelCount: [2],
+      });
+
+      const source = musicCtx.createMediaStreamSource(stream);
+      const silentGain = musicCtx.createGain();
+      silentGain.gain.value = 0.00001;
+      source.connect(captureNode);
+      captureNode.connect(silentGain);
+      silentGain.connect(musicCtx.destination);
+
+      // Create stereo Opus encoder at 128kbps
+      let musicSeq = 0;
+      const encoder = new AudioEncoder({
+        output: (chunk) => {
+          const buf = new ArrayBuffer(chunk.byteLength);
+          chunk.copyTo(buf);
+          socket.volatile.emit('music:chunk', {
+            channelId: channelIdRef.current,
+            data: buf,
+            seq: musicSeq++,
+          });
+        },
+        error: (e) => console.error('[Music] Encoder error:', e),
+      });
+      encoder.configure({
+        codec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: 2,
+        bitrate: 128000,
+      });
+      musicEncoderRef.current = encoder;
+
+      // Handle frames from capture worklet
+      let frameTimestamp = 0;
+      captureNode.port.onmessage = (e) => {
+        const { left, right } = e.data;
+        if (!left || !right) return;
+        if (!musicEncoderRef.current || musicEncoderRef.current.state !== 'configured') return;
+        try {
+          // Interleave into planar AudioData (left plane then right plane)
+          const planarData = new Float32Array(left.length + right.length);
+          planarData.set(left, 0);
+          planarData.set(right, left.length);
+          const audioData = new AudioData({
+            format: 'f32-planar',
+            sampleRate: 48000,
+            numberOfFrames: left.length,
+            numberOfChannels: 2,
+            timestamp: frameTimestamp,
+            data: planarData,
+          });
+          encoder.encode(audioData);
+          audioData.close();
+          frameTimestamp += 20000;
+        } catch (e) {
+          console.error('[Music] Encode error:', e);
+        }
+      };
+
+      musicStreamRef.current = stream;
+
+      // Tell server we're sharing
+      socket.emit('music:start', { channelId: channelIdRef.current }, (response) => {
+        if (!response?.success) {
+          // Failed — clean up
+          alert(response?.error || 'Could not start sharing');
+          encoder.close();
+          musicCtx.close();
+          stream.getTracks().forEach((t) => t.stop());
+          musicStreamRef.current = null;
+          musicContextRef.current = null;
+          musicEncoderRef.current = null;
+          return;
+        }
+        setIsSharing(true);
+        isSharingRef.current = true;
+        setSharingUser({ socketId: socket.id, username: 'You' });
+      });
+
+      // Auto-stop when the browser's "Stop sharing" bar is clicked
+      audioTracks[0].addEventListener('ended', () => {
+        stopSharingRef.current?.();
+      });
+    } catch (err) {
+      console.error('[Music] Sharing init error:', err);
+      stream.getTracks().forEach((t) => t.stop());
+    }
+  }, [socket]);
+
+  const stopSharing = useCallback(() => {
+    if (!socket) return;
+    socket.emit('music:stop', { channelId: channelIdRef.current });
+
+    if (musicEncoderRef.current) {
+      try { musicEncoderRef.current.close(); } catch { /* ignore */ }
+      musicEncoderRef.current = null;
+    }
+    if (musicContextRef.current) {
+      try { musicContextRef.current.close(); } catch { /* ignore */ }
+      musicContextRef.current = null;
+    }
+    if (musicStreamRef.current) {
+      musicStreamRef.current.getTracks().forEach((t) => t.stop());
+      musicStreamRef.current = null;
+    }
+    setIsSharing(false);
+    isSharingRef.current = false;
+    setSharingUser(null);
+  }, [socket]);
+
+  stopSharingRef.current = stopSharing;
+
+  const setMusicVolume = useCallback((val) => {
+    const v = Math.max(0, Math.min(100, Math.round(val)));
+    setMusicVolumeState(v);
+    localStorage.setItem('disclone_music_volume', String(v));
+    if (musicGainNodeRef.current) {
+      musicGainNodeRef.current.gain.value = v / 100;
+    }
+  }, []);
+
   return {
     isMuted,
     isSpeaking,
@@ -551,5 +850,12 @@ export default function useVoice(channelId) {
     peerStates,
     sensitivity,
     setSensitivity,
+    isSharing,
+    sharingUser,
+    startSharing,
+    stopSharing,
+    sharingSupported,
+    musicVolume,
+    setMusicVolume,
   };
 }
