@@ -2,7 +2,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._peers = new Map();
-    this._prefillSamples = Math.round(sampleRate * 0.1); // 100ms prefill (was 80ms)
+    this._prefillSamples = Math.round(sampleRate * 0.15); // 150ms prefill
     this._underrunLimit = Math.ceil(sampleRate * 0.1 / 128); // ~100ms
     this._fadeInLength = Math.round(sampleRate * 0.005); // 5ms fade-in
     this._decay = Math.exp(-1 / (sampleRate * 0.003)); // 3ms exponential decay

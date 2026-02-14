@@ -16,6 +16,10 @@ function AppContent() {
   const [voiceChannel, setVoiceChannel] = useState(null);
   const [voiceMembers, setVoiceMembers] = useState(new Map());
   const [messages, setMessages] = useState(new Map());
+  const [userStatus, setUserStatusState] = useState(() => {
+    const saved = localStorage.getItem('disclone_user_status');
+    return saved || 'online';
+  });
 
   // Auto-login from localStorage when socket connects
   useEffect(() => {
@@ -31,6 +35,10 @@ function AppContent() {
           if (response.success) {
             setUser(response.user);
             setChannels(response.channels);
+            // Restore saved status
+            const savedStatus = localStorage.getItem('disclone_user_status') || 'online';
+            setUserStatusState(savedStatus);
+            socket.emit('user:status', { status: savedStatus });
             // Load initial voice room state
             if (response.voiceState) {
               setVoiceMembers((prev) => {
@@ -104,6 +112,10 @@ function AppContent() {
             'disclone_session',
             JSON.stringify({ username: response.user.username, password: password || null })
           );
+          // Restore saved status
+          const savedStatus = localStorage.getItem('disclone_user_status') || 'online';
+          setUserStatusState(savedStatus);
+          socket.emit('user:status', { status: savedStatus });
           // Load initial voice room state
           if (response.voiceState) {
             setVoiceMembers((prev) => {
@@ -159,6 +171,32 @@ function AppContent() {
     [socket, activeChannel]
   );
 
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('disclone_session');
+    if (socket) {
+      socket.disconnect();
+    }
+    setUser(null);
+    setOnlineUsers([]);
+    setVoiceChannel(null);
+    setVoiceMembers(new Map());
+    setMessages(new Map());
+    setChannels([]);
+    setActiveChannel('general');
+    setLoginError('');
+    if (socket) {
+      socket.connect();
+    }
+  }, [socket]);
+
+  const handleStatusChange = useCallback((status) => {
+    setUserStatusState(status);
+    localStorage.setItem('disclone_user_status', status);
+    if (socket) {
+      socket.emit('user:status', { status });
+    }
+  }, [socket]);
+
   const voiceState = useVoice(voiceChannel);
 
   const handleVoiceJoin = useCallback(
@@ -200,6 +238,9 @@ function AppContent() {
         user={user}
         voiceState={voiceState}
         voiceChannelName={voiceChannelInfo?.name}
+        onLogout={handleLogout}
+        userStatus={userStatus}
+        onStatusChange={handleStatusChange}
       />
       <main className="flex-1 flex flex-col bg-discord-chat min-w-0">
         {currentChannel?.type === 'text' && (

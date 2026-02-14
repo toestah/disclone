@@ -93,6 +93,10 @@ export default function useVoice(channelId) {
     const saved = localStorage.getItem('disclone_music_volume');
     return saved !== null ? Number(saved) : 80;
   });
+  const [shareVolume, setShareVolumeState] = useState(() => {
+    const saved = localStorage.getItem('disclone_share_volume');
+    return saved !== null ? Number(saved) : 100;
+  });
 
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -114,6 +118,10 @@ export default function useVoice(channelId) {
   const musicDecoderRef = useRef(null);
   const musicPlaybackNodeRef = useRef(null);
   const musicGainNodeRef = useRef(null);
+  const shareGainNodeRef = useRef(null);
+  const masterCompressorRef = useRef(null);
+  const lastSeqRef = useRef(new Map());
+  const lastPcmRef = useRef(new Map());
   const isSharingRef = useRef(false);
   const stopSharingRef = useRef(null);
 
@@ -152,6 +160,25 @@ export default function useVoice(channelId) {
       const playNode = playbackNodeRef.current;
       if (!playNode) return;
 
+      // ── Packet Loss Concealment (PLC) ──
+      // Track sequence numbers per peer; repeat last frame for gaps
+      function storePcmAndPLC(peerId, pcm, currentSeq) {
+        const lastSeq = lastSeqRef.current.get(peerId);
+        const lastPcm = lastPcmRef.current.get(peerId);
+        if (lastSeq !== undefined && lastPcm && currentSeq > lastSeq + 1) {
+          const missed = Math.min(currentSeq - lastSeq - 1, 3); // cap at 3 repeats
+          for (let i = 0; i < missed; i++) {
+            const repeated = new Float32Array(lastPcm);
+            playNode.port.postMessage({ peerId, pcm: repeated }, [repeated.buffer]);
+          }
+        }
+        lastSeqRef.current.set(peerId, currentSeq);
+        lastPcmRef.current.set(peerId, new Float32Array(pcm));
+        playNode.port.postMessage({ peerId, pcm }, [pcm.buffer]);
+      }
+
+      const currentSeq = seq || 0;
+
       if (codec === 'opus' && typeof AudioDecoder !== 'undefined') {
         let decoder = decodersRef.current.get(from);
         if (!decoder) {
@@ -165,7 +192,7 @@ export default function useVoice(channelId) {
                 if (playRate !== 48000) {
                   pcm = resampleLinear(pcm, 48000, playRate);
                 }
-                playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
+                storePcmAndPLC(from, pcm, currentSeq);
               } catch (e) {
                 console.error('[Voice] Decode output error:', e);
               }
@@ -181,7 +208,7 @@ export default function useVoice(channelId) {
         try {
           const chunk = new EncodedAudioChunk({
             type: 'key',
-            timestamp: (seq || 0) * 20000,
+            timestamp: currentSeq * 20000,
             data,
           });
           decoder.decode(chunk);
@@ -202,7 +229,7 @@ export default function useVoice(channelId) {
         if (srcRate !== playRate) {
           pcm = resampleLinear(pcm, srcRate, playRate);
         }
-        playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
+        storePcmAndPLC(from, pcm, currentSeq);
       }
     }
 
@@ -217,6 +244,8 @@ export default function useVoice(channelId) {
     function handleUserLeft({ socketId }) {
       console.log(`[Voice] → user-left: ${socketId}`);
       peerCapsRef.current.delete(socketId);
+      lastSeqRef.current.delete(socketId);
+      lastPcmRef.current.delete(socketId);
       playChime(playbackCtxRef, 'down');
       const decoder = decodersRef.current.get(socketId);
       if (decoder) {
@@ -320,11 +349,21 @@ export default function useVoice(channelId) {
 
     async function init() {
       try {
-        // ── Setup playback AudioWorklet ──
+        // ── Master compressor for combined voice + music output ──
         const playCtx = playbackCtxRef.current;
+        const masterCompressor = playCtx.createDynamicsCompressor();
+        masterCompressor.threshold.value = -6;
+        masterCompressor.knee.value = 6;
+        masterCompressor.ratio.value = 3;
+        masterCompressor.attack.value = 0.003;
+        masterCompressor.release.value = 0.1;
+        masterCompressor.connect(playCtx.destination);
+        masterCompressorRef.current = masterCompressor;
+
+        // ── Setup playback AudioWorklet ──
         await playCtx.audioWorklet.addModule('/playback-processor.js');
         const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor');
-        playbackNode.connect(playCtx.destination);
+        playbackNode.connect(masterCompressor);
         playbackNodeRef.current = playbackNode;
 
         // ── Setup music playback AudioWorklet ──
@@ -336,7 +375,7 @@ export default function useVoice(channelId) {
         const savedVol = localStorage.getItem('disclone_music_volume');
         musicGain.gain.value = (savedVol !== null ? Number(savedVol) : 80) / 100;
         musicPlaybackNode.connect(musicGain);
-        musicGain.connect(playCtx.destination);
+        musicGain.connect(masterCompressor);
         musicPlaybackNodeRef.current = musicPlaybackNode;
         musicGainNodeRef.current = musicGain;
 
@@ -645,6 +684,13 @@ export default function useVoice(channelId) {
         localStreamRef.current = null;
       }
 
+      if (masterCompressorRef.current) {
+        masterCompressorRef.current.disconnect();
+        masterCompressorRef.current = null;
+      }
+      shareGainNodeRef.current = null;
+      lastSeqRef.current.clear();
+      lastPcmRef.current.clear();
       peerCapsRef.current.clear();
       wasSpeakingRef.current = false;
       lastSpeechTimeRef.current = 0;
@@ -722,13 +768,18 @@ export default function useVoice(channelId) {
       });
 
       const source = musicCtx.createMediaStreamSource(stream);
+      const shareGain = musicCtx.createGain();
+      const savedShareVol = localStorage.getItem('disclone_share_volume');
+      shareGain.gain.value = (savedShareVol !== null ? Number(savedShareVol) : 100) / 100;
+      shareGainNodeRef.current = shareGain;
       const silentGain = musicCtx.createGain();
       silentGain.gain.value = 0.00001;
-      source.connect(captureNode);
+      source.connect(shareGain);
+      shareGain.connect(captureNode);
       captureNode.connect(silentGain);
       silentGain.connect(musicCtx.destination);
 
-      // Create stereo Opus encoder at 128kbps
+      // Create stereo Opus encoder at 96kbps
       let musicSeq = 0;
       const encoder = new AudioEncoder({
         output: (chunk) => {
@@ -746,7 +797,7 @@ export default function useVoice(channelId) {
         codec: 'opus',
         sampleRate: 48000,
         numberOfChannels: 2,
-        bitrate: 128000,
+        bitrate: 96000,
       });
       musicEncoderRef.current = encoder;
 
@@ -839,6 +890,15 @@ export default function useVoice(channelId) {
     }
   }, []);
 
+  const setShareVolume = useCallback((val) => {
+    const v = Math.max(0, Math.min(100, Math.round(val)));
+    setShareVolumeState(v);
+    localStorage.setItem('disclone_share_volume', String(v));
+    if (shareGainNodeRef.current) {
+      shareGainNodeRef.current.gain.value = v / 100;
+    }
+  }, []);
+
   return {
     isMuted,
     isSpeaking,
@@ -857,5 +917,7 @@ export default function useVoice(channelId) {
     sharingSupported,
     musicVolume,
     setMusicVolume,
+    shareVolume,
+    setShareVolume,
   };
 }

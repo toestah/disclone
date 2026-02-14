@@ -9,7 +9,7 @@ class MusicPlaybackProcessor extends AudioWorkletProcessor {
     this._r = 0;
     this._started = false;
     this._underruns = 0;
-    this._prefillSamples = Math.round(sampleRate * 0.15); // 150ms prefill
+    this._prefillSamples = Math.round(sampleRate * 0.3); // 300ms prefill
     this._underrunLimit = Math.ceil(sampleRate * 0.1 / 128); // ~100ms
     this._fadeInLength = Math.round(sampleRate * 0.01); // 10ms fade-in
     this._decay = Math.exp(-1 / (sampleRate * 0.005)); // 5ms exponential decay

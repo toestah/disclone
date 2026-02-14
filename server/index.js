@@ -35,7 +35,7 @@ const io = new Server(httpServer, {
 
 // ── In-Memory State ──────────────────────────────────────────────
 
-// Registered users: username -> { password, avatarColor }
+// Registered users: username -> { password, avatarColor, status, lastSeen }
 const registeredUsers = new Map();
 
 // Active sessions: socket.id -> { username, avatarColor, currentChannel }
@@ -85,16 +85,43 @@ function randomAvatarColor() {
   return AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
 }
 
-function getOnlineUsers() {
-  const users = [];
+function getAllUsersForBroadcast() {
+  // Build a set of usernames with active sessions
+  const activeByUsername = new Map();
   for (const [socketId, session] of activeSessions) {
-    users.push({
-      socketId,
-      username: session.username,
-      avatarColor: session.avatarColor,
-      currentChannel: session.currentChannel,
-    });
+    activeByUsername.set(session.username, { socketId, session });
   }
+
+  const users = [];
+  for (const [username, data] of registeredUsers) {
+    const active = activeByUsername.get(username);
+    if (active) {
+      const status = data.status === 'invisible' ? 'offline' : (data.status || 'online');
+      users.push({
+        socketId: active.socketId,
+        username,
+        avatarColor: data.avatarColor,
+        currentChannel: active.session.currentChannel,
+        status,
+      });
+    } else {
+      users.push({
+        socketId: null,
+        username,
+        avatarColor: data.avatarColor,
+        currentChannel: null,
+        status: 'offline',
+      });
+    }
+  }
+
+  // Sort: online/away/busy first, offline last
+  users.sort((a, b) => {
+    const aOnline = a.status !== 'offline' ? 0 : 1;
+    const bOnline = b.status !== 'offline' ? 0 : 1;
+    return aOnline - bOnline || a.username.localeCompare(b.username);
+  });
+
   return users;
 }
 
@@ -151,9 +178,9 @@ io.on('connection', (socket) => {
     // Register or update user
     const avatarColor = existing?.avatarColor || randomAvatarColor();
     if (password && !existing?.password) {
-      registeredUsers.set(trimmed, { password, avatarColor });
+      registeredUsers.set(trimmed, { password, avatarColor, status: existing?.status || 'online', lastSeen: null });
     } else if (!existing) {
-      registeredUsers.set(trimmed, { password: null, avatarColor });
+      registeredUsers.set(trimmed, { password: null, avatarColor, status: 'online', lastSeen: null });
     }
 
     // Create session
@@ -164,7 +191,7 @@ io.on('connection', (socket) => {
     });
 
     socket.join('general');
-    io.emit('users:update', getOnlineUsers());
+    io.emit('users:update', getAllUsersForBroadcast());
 
     // Build current voice room state so new user sees who's in voice
     const voiceState = {};
@@ -174,9 +201,10 @@ io.on('connection', (socket) => {
       }
     }
 
+    const userEntry = registeredUsers.get(trimmed);
     callback({
       success: true,
-      user: { username: trimmed, avatarColor },
+      user: { username: trimmed, avatarColor, status: userEntry?.status || 'online' },
       channels,
       voiceState,
     });
@@ -203,7 +231,7 @@ io.on('connection', (socket) => {
     const history = messageHistory.get(channelId) || [];
     callback?.({ success: true, messages: history.slice(-100) });
 
-    io.emit('users:update', getOnlineUsers());
+    io.emit('users:update', getAllUsersForBroadcast());
   });
 
   socket.on('message:send', ({ channelId, content }) => {
@@ -293,7 +321,7 @@ io.on('connection', (socket) => {
       channelId,
       members: getVoiceRoomMembers(channelId),
     });
-    io.emit('users:update', getOnlineUsers());
+    io.emit('users:update', getAllUsersForBroadcast());
   });
 
   socket.on('voice:leave', ({ channelId }) => {
@@ -326,7 +354,7 @@ io.on('connection', (socket) => {
         channelId,
         members: getVoiceRoomMembers(channelId),
       });
-      io.emit('users:update', getOnlineUsers());
+      io.emit('users:update', getAllUsersForBroadcast());
     }
   });
 
@@ -404,11 +432,28 @@ io.on('connection', (socket) => {
     const room = voiceRooms.get(channelId);
     if (!room || !room.has(socket.id)) return;
     if (musicSharers.get(channelId) !== socket.id) return;
-    socket.to(`voice:${channelId}`).volatile.emit('music:chunk', {
-      from: socket.id,
-      data,
-      seq,
+    // Defer music relay so voice (audio:chunk) gets event-loop priority
+    setImmediate(() => {
+      socket.to(`voice:${channelId}`).volatile.emit('music:chunk', {
+        from: socket.id,
+        data,
+        seq,
+      });
     });
+  });
+
+  // ── User Status ──
+
+  socket.on('user:status', ({ status }) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return;
+    const validStatuses = ['online', 'away', 'busy', 'invisible'];
+    if (!validStatuses.includes(status)) return;
+    const userEntry = registeredUsers.get(session.username);
+    if (userEntry) {
+      userEntry.status = status;
+    }
+    io.emit('users:update', getAllUsersForBroadcast());
   });
 
   // ── Disconnect ──
@@ -418,6 +463,12 @@ io.on('connection', (socket) => {
     if (!session) return;
 
     console.log(`Disconnected: ${socket.id} (${session.username})`);
+
+    // Update lastSeen on registered user
+    const userEntry = registeredUsers.get(session.username);
+    if (userEntry) {
+      userEntry.lastSeen = Date.now();
+    }
 
     for (const [roomId, room] of voiceRooms) {
       if (room.has(socket.id)) {
@@ -446,7 +497,7 @@ io.on('connection', (socket) => {
     mutedState.delete(socket.id);
     clientCapabilities.delete(socket.id);
     activeSessions.delete(socket.id);
-    io.emit('users:update', getOnlineUsers());
+    io.emit('users:update', getAllUsersForBroadcast());
   });
 });
 

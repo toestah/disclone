@@ -1,5 +1,31 @@
 import { useState, useRef, useEffect } from 'react';
 
+const STATUS_CONFIG = {
+  online: { label: 'Online', color: 'bg-discord-green', textColor: 'text-discord-green' },
+  away: { label: 'Away', color: 'bg-discord-yellow', textColor: 'text-discord-yellow' },
+  busy: { label: 'Do Not Disturb', color: 'bg-discord-red', textColor: 'text-discord-red' },
+  invisible: { label: 'Invisible', color: 'bg-discord-muted/60', textColor: 'text-discord-muted' },
+};
+
+function StatusDot({ status, className = '' }) {
+  const config = STATUS_CONFIG[status] || STATUS_CONFIG.online;
+  if (status === 'busy') {
+    return (
+      <div className={`${config.color} rounded-full flex items-center justify-center ${className}`}>
+        <div className="w-1.5 h-0.5 bg-discord-dark rounded-full" />
+      </div>
+    );
+  }
+  if (status === 'away') {
+    return (
+      <div className={`${config.color} rounded-full relative ${className}`}>
+        <div className="absolute top-0.5 left-0.5 w-1.5 h-1.5 bg-discord-dark rounded-full" />
+      </div>
+    );
+  }
+  return <div className={`${config.color} rounded-full ${className}`} />;
+}
+
 export default function Sidebar({
   channels,
   activeChannel,
@@ -11,6 +37,9 @@ export default function Sidebar({
   user,
   voiceState,
   voiceChannelName,
+  onLogout,
+  userStatus,
+  onStatusChange,
 }) {
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
@@ -18,22 +47,30 @@ export default function Sidebar({
   const {
     isMuted, isSpeaking, speakingPeers, toggleMute, micLevel, sensitivity, setSensitivity,
     isSharing, sharingUser, startSharing, stopSharing, sharingSupported, musicVolume, setMusicVolume,
+    shareVolume, setShareVolume,
   } = voiceState || {};
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showStatusPicker, setShowStatusPicker] = useState(false);
   const settingsRef = useRef(null);
+  const statusRef = useRef(null);
 
   // Close settings popover on click outside
   useEffect(() => {
-    if (!showSettings) return;
+    if (!showSettings && !showStatusPicker) return;
     function handleClick(e) {
-      if (settingsRef.current && !settingsRef.current.contains(e.target)) {
+      if (showSettings && settingsRef.current && !settingsRef.current.contains(e.target)) {
         setShowSettings(false);
+      }
+      if (showStatusPicker && statusRef.current && !statusRef.current.contains(e.target)) {
+        setShowStatusPicker(false);
       }
     }
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
-  }, [showSettings]);
+  }, [showSettings, showStatusPicker]);
+
+  const statusConfig = STATUS_CONFIG[userStatus] || STATUS_CONFIG.online;
 
   return (
     <div className="w-60 bg-discord-darker flex flex-col h-full flex-shrink-0">
@@ -165,6 +202,23 @@ export default function Sidebar({
               <span className="text-[11px] font-medium truncate">{sharingUser.username} is sharing audio</span>
             </div>
           )}
+          {/* Presenter volume slider — shown when sharing */}
+          {isSharing && (
+            <div className="px-2 py-1 mb-1.5 mx-1 rounded bg-discord-green/10">
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] text-discord-green font-medium">Share Volume</label>
+                <span className="text-[10px] text-discord-green/70 tabular-nums">{shareVolume ?? 100}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={shareVolume ?? 100}
+                onChange={(e) => setShareVolume?.(Number(e.target.value))}
+                className="voice-slider w-full"
+              />
+            </div>
+          )}
           <div className="flex items-center gap-1 px-1">
             <button
               onClick={toggleMute}
@@ -282,22 +336,69 @@ export default function Sidebar({
           </div>
         )}
 
+        {/* Status picker dropdown */}
+        {showStatusPicker && (
+          <div ref={statusRef} className="absolute bottom-full left-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 z-50 w-48">
+            {Object.entries(STATUS_CONFIG).map(([key, config]) => (
+              <button
+                key={key}
+                onClick={() => {
+                  onStatusChange?.(key);
+                  setShowStatusPicker(false);
+                }}
+                className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-discord-hover ${
+                  userStatus === key ? 'text-white' : 'text-discord-text'
+                }`}
+              >
+                <StatusDot status={key} className="w-3 h-3" />
+                <span className="text-[13px] font-medium">{config.label}</span>
+                {userStatus === key && (
+                  <svg className="w-3.5 h-3.5 ml-auto text-discord-accent" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                  </svg>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-center gap-2.5 px-1.5 py-1 rounded hover:bg-discord-hover/50 transition-colors">
-          <div className="relative flex-shrink-0">
+          <div
+            className="relative flex-shrink-0 cursor-pointer"
+            onClick={() => setShowStatusPicker((s) => !s)}
+            title="Change status"
+          >
             <div
               className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold"
               style={{ backgroundColor: user.avatarColor }}
             >
               {user.username[0].toUpperCase()}
             </div>
-            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-discord-green rounded-full border-2 border-discord-dark" />
+            <div className="absolute -bottom-0.5 -right-0.5 border-2 border-discord-dark rounded-full">
+              <StatusDot status={userStatus || 'online'} className="w-3 h-3" />
+            </div>
           </div>
-          <div className="flex-1 min-w-0">
+          <div
+            className="flex-1 min-w-0 cursor-pointer"
+            onClick={() => setShowStatusPicker((s) => !s)}
+            title="Change status"
+          >
             <div className="text-[13px] font-semibold text-white truncate leading-tight">
               {user.username}
             </div>
-            <div className="text-[11px] text-discord-green leading-tight mt-0.5">Online</div>
+            <div className={`text-[11px] ${statusConfig.textColor} leading-tight mt-0.5`}>
+              {statusConfig.label}
+            </div>
           </div>
+          <button
+            onClick={onLogout}
+            className="p-1.5 rounded transition-colors flex-shrink-0 text-discord-muted hover:text-discord-red hover:bg-discord-red/10"
+            title="Log Out"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M10.09 15.59L11.5 17l5-5-5-5-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59zM19 3H5c-1.11 0-2 .9-2 2v4h2V5h14v14H5v-4H3v4c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
+            </svg>
+          </button>
           <button
             onClick={() => setShowSettings((s) => !s)}
             className={`p-1.5 rounded transition-colors flex-shrink-0 ${
@@ -316,3 +417,5 @@ export default function Sidebar({
     </div>
   );
 }
+
+export { StatusDot };

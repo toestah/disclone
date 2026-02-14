@@ -26,10 +26,19 @@ class MusicCaptureProcessor extends AudioWorkletProcessor {
       this._rightBuf[this._offset] = right[i];
       this._offset++;
       if (this._offset >= this._frameSize) {
-        // Always transmit (no silence gate for music)
-        const l = this._leftBuf.slice();
-        const r = this._rightBuf.slice();
-        this.port.postMessage({ left: l, right: r }, [l.buffer, r.buffer]);
+        // Silence gate — skip true silence to save bandwidth
+        let peak = 0;
+        for (let j = 0; j < this._frameSize; j++) {
+          const al = Math.abs(this._leftBuf[j]);
+          const ar = Math.abs(this._rightBuf[j]);
+          if (al > peak) peak = al;
+          if (ar > peak) peak = ar;
+        }
+        if (peak > 0.0001) {
+          const l = this._leftBuf.slice();
+          const r = this._rightBuf.slice();
+          this.port.postMessage({ left: l, right: r }, [l.buffer, r.buffer]);
+        }
         this._offset = 0;
       }
     }
