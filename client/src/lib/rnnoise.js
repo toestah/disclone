@@ -36,11 +36,14 @@ export class RnnoiseDenoiser {
     // Allocate 480-float buffers on WASM heap (480 * 4 bytes each)
     this._inputPtr = module._malloc(480 * 4);
     this._outputPtr = module._malloc(480 * 4);
+    // Reusable JS-side output buffer — caller must copy before next processFrame call
+    this._frameBuf = new Float32Array(480);
     this._destroyed = false;
   }
 
   /**
    * Process a single 480-sample frame.
+   * NOTE: output is a shared buffer — data is only valid until the next processFrame call.
    * @param {Float32Array} frame - exactly 480 float32 samples
    * @returns {{ output: Float32Array, vadProb: number }} denoised samples + VAD probability
    */
@@ -61,8 +64,8 @@ export class RnnoiseDenoiser {
     // Process — returns VAD probability [0, 1]
     const vadProb = M._rnnoise_process_frame(this._state, this._outputPtr, this._inputPtr);
 
-    // Copy output from WASM heap and scale back to float32 range
-    const output = new Float32Array(480);
+    // Copy output from WASM heap into reusable buffer
+    const output = this._frameBuf;
     for (let i = 0; i < 480; i++) {
       output[i] = heapF32[outputOffset + i] / 32768;
     }
@@ -83,6 +86,7 @@ export class RnnoiseDenoiser {
     this._state = null;
     this._inputPtr = null;
     this._outputPtr = null;
+    this._frameBuf = null;
   }
 }
 
@@ -102,56 +106,57 @@ export function denoiseFrame(denoiser, frame, inputRate) {
   const RNNOISE_RATE = 48000;
   const RNNOISE_FRAME = 480;
 
-  let workFrame = frame;
-
-  // Resample to 48kHz if needed
-  if (inputRate !== RNNOISE_RATE) {
-    const ratio = inputRate / RNNOISE_RATE;
-    const outLen = Math.round(frame.length / ratio);
-    workFrame = new Float32Array(outLen);
-    for (let i = 0; i < outLen; i++) {
-      const srcIdx = i * ratio;
-      const idx0 = Math.floor(srcIdx);
-      const idx1 = Math.min(idx0 + 1, frame.length - 1);
-      const frac = srcIdx - idx0;
-      workFrame[i] = frame[idx0] + (frame[idx1] - frame[idx0]) * frac;
+  // Fast path: denoise in-place at 48kHz (zero allocations)
+  // processFrame writes to a reusable buffer; .set() copies it into frame
+  // before the next processFrame call overwrites it, so this is safe.
+  if (inputRate === RNNOISE_RATE) {
+    const numChunks = Math.floor(frame.length / RNNOISE_FRAME);
+    let vadProbSum = 0;
+    for (let c = 0; c < numChunks; c++) {
+      const offset = c * RNNOISE_FRAME;
+      const chunk = frame.subarray(offset, offset + RNNOISE_FRAME);
+      const { output, vadProb } = denoiser.processFrame(chunk);
+      frame.set(output, offset);
+      vadProbSum += vadProb;
     }
+    // Remaining samples (< 480) left untouched
+    return { pcm: frame, vadProb: numChunks > 0 ? vadProbSum / numChunks : 0 };
   }
 
-  // Process in 480-sample chunks, accumulate VAD probability
-  const numChunks = Math.floor(workFrame.length / RNNOISE_FRAME);
-  const denoisedWork = new Float32Array(workFrame.length);
-  let vadProbSum = 0;
+  // Slow path: resample to 48kHz, denoise in-place on work buffer, resample back
+  const ratioIn = inputRate / RNNOISE_RATE;
+  const workLen = Math.round(frame.length / ratioIn);
+  const workFrame = new Float32Array(workLen);
+  for (let i = 0; i < workLen; i++) {
+    const srcIdx = i * ratioIn;
+    const idx0 = Math.floor(srcIdx);
+    const idx1 = Math.min(idx0 + 1, frame.length - 1);
+    const frac = srcIdx - idx0;
+    workFrame[i] = frame[idx0] + (frame[idx1] - frame[idx0]) * frac;
+  }
 
+  // Process in-place on workFrame (no separate denoisedWork allocation)
+  const numChunks = Math.floor(workLen / RNNOISE_FRAME);
+  let vadProbSum = 0;
   for (let c = 0; c < numChunks; c++) {
-    const chunk = workFrame.subarray(c * RNNOISE_FRAME, (c + 1) * RNNOISE_FRAME);
+    const offset = c * RNNOISE_FRAME;
+    const chunk = workFrame.subarray(offset, offset + RNNOISE_FRAME);
     const { output, vadProb } = denoiser.processFrame(chunk);
-    denoisedWork.set(output, c * RNNOISE_FRAME);
+    workFrame.set(output, offset);
     vadProbSum += vadProb;
   }
-
   const avgVadProb = numChunks > 0 ? vadProbSum / numChunks : 0;
+  // Remaining samples (< 480) stay as resampled input
 
-  // Copy any remaining samples (< 480) unprocessed
-  const processed = numChunks * RNNOISE_FRAME;
-  if (processed < workFrame.length) {
-    denoisedWork.set(workFrame.subarray(processed), processed);
+  // Resample back to original rate
+  const ratioOut = RNNOISE_RATE / inputRate;
+  const result = new Float32Array(frame.length);
+  for (let i = 0; i < frame.length; i++) {
+    const srcIdx = i * ratioOut;
+    const idx0 = Math.floor(srcIdx);
+    const idx1 = Math.min(idx0 + 1, workFrame.length - 1);
+    const frac = srcIdx - idx0;
+    result[i] = workFrame[idx0] + (workFrame[idx1] - workFrame[idx0]) * frac;
   }
-
-  // Resample back to original rate if needed
-  if (inputRate !== RNNOISE_RATE) {
-    const ratio = RNNOISE_RATE / inputRate;
-    const outLen = frame.length;
-    const result = new Float32Array(outLen);
-    for (let i = 0; i < outLen; i++) {
-      const srcIdx = i * ratio;
-      const idx0 = Math.floor(srcIdx);
-      const idx1 = Math.min(idx0 + 1, denoisedWork.length - 1);
-      const frac = srcIdx - idx0;
-      result[i] = denoisedWork[idx0] + (denoisedWork[idx1] - denoisedWork[idx0]) * frac;
-    }
-    return { pcm: result, vadProb: avgVadProb };
-  }
-
-  return { pcm: denoisedWork, vadProb: avgVadProb };
+  return { pcm: result, vadProb: avgVadProb };
 }
