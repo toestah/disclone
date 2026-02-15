@@ -3,3 +3,5 @@ dist/
 certs/
 .DS_Store
 .claude/
+tests/results/
+tests/node_modules/

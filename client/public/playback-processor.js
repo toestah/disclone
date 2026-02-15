@@ -2,7 +2,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._peers = new Map();
-    this._prefillSamples = Math.round(sampleRate * 0.15); // 150ms prefill
+    this._prefillSamples = Math.round(sampleRate * 0.06); // 60ms prefill (lower latency)
     this._underrunLimit = Math.ceil(sampleRate * 0.1 / 128); // ~100ms
     this._fadeInLength = Math.round(sampleRate * 0.005); // 5ms fade-in
     this._decay = Math.exp(-1 / (sampleRate * 0.003)); // 3ms exponential decay
@@ -100,10 +100,17 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Soft clip
+    // Soft clip — linear below ±0.9, smooth saturation above
+    // Avoids harsh odd-harmonic distortion from hard clipping during multi-peer mixing
     for (let i = 0; i < output.length; i++) {
-      if (output[i] > 1) output[i] = 1;
-      else if (output[i] < -1) output[i] = -1;
+      const x = output[i];
+      if (x > 0.9) {
+        const over = x - 0.9;
+        output[i] = 0.9 + 0.1 * (1 - 1 / (1 + over * 10));
+      } else if (x < -0.9) {
+        const over = -x - 0.9;
+        output[i] = -0.9 - 0.1 * (1 - 1 / (1 + over * 10));
+      }
     }
 
     return true;

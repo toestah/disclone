@@ -41,9 +41,17 @@ function playChime(ctxRef, direction) {
 // ── Constants ───────────────────────────────────────────────────
 
 const GATE_HOLD_MS = 300;
+const MIN_NOISE_FLOOR = 3;
 
-function computeThreshold(sensitivity) {
-  return Math.max(2, Math.round(60 * Math.pow(0.97, sensitivity)));
+/**
+ * Compute margin above adaptive noise floor from sensitivity slider (0–100).
+ * Higher sensitivity → smaller margin → easier to trigger.
+ *   sensitivity  0 → margin 25 (need to be very loud above noise)
+ *   sensitivity 50 → margin 14
+ *   sensitivity 100 → margin 3
+ */
+function computeMargin(sensitivity) {
+  return Math.round(3 + 22 * (1 - sensitivity / 100));
 }
 
 function resampleLinear(input, fromRate, toRate) {
@@ -410,6 +418,9 @@ export default function useVoice(channelId) {
         if (cancelled) return;
 
         // ── Voice processing chain ──
+        // Minimal chain: HP filter for rumble, then straight to capture.
+        // Browser's getUserMedia already provides echoCancellation + noiseSuppression + autoGainControl.
+        // No lowpass (was 12kHz, muffled sibilants) and no compressor (caused pumping/feedback loops).
         const micSource = audioCtx.createMediaStreamSource(stream);
 
         const highPass = audioCtx.createBiquadFilter();
@@ -417,45 +428,73 @@ export default function useVoice(channelId) {
         highPass.frequency.value = 80;
         highPass.Q.value = 0.707;
 
-        const lowPass = audioCtx.createBiquadFilter();
-        lowPass.type = 'lowpass';
-        lowPass.frequency.value = 12000;
-        lowPass.Q.value = 0.707;
-
-        const compressor = audioCtx.createDynamicsCompressor();
-        compressor.threshold.value = -24;
-        compressor.knee.value = 12;
-        compressor.ratio.value = 4;
-        compressor.attack.value = 0.003;
-        compressor.release.value = 0.25;
-
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 1024;
         analyser.smoothingTimeConstant = 0.5;
 
         const captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
 
-        // Chain: mic → HP → LP → compressor → captureNode (pass-through) → analyser → silent output
+        // Chain: mic → HP → captureNode (pass-through) → analyser → silent output
         micSource.connect(highPass);
-        highPass.connect(lowPass);
-        lowPass.connect(compressor);
-        compressor.connect(captureNode);
+        highPass.connect(captureNode);
         captureNode.connect(analyser);
         const silentGain = audioCtx.createGain();
         silentGain.gain.value = 0.00001;
         analyser.connect(silentGain);
         silentGain.connect(audioCtx.destination);
 
-        // ── VAD (100ms interval for UI + gate timing) ──
+        // ── Speech-weighted adaptive VAD ──
+        // Only looks at 300Hz–3kHz (speech formant range). Ignores:
+        //   - Low-freq rumble (chair, footsteps, HVAC)
+        //   - High-freq hiss (fans, electronics)
+        //   - Broadband transients outside speech band (keyboard clicks)
+        // Adaptive noise floor tracks ambient level during silence,
+        // so threshold auto-adjusts to the room.
+        const binWidth = nativeRate / analyser.fftSize;
+        const speechLowBin = Math.round(200 / binWidth);   // ~200Hz (captures male fundamentals)
+        const speechHighBin = Math.floor(3000 / binWidth);  // ~3kHz
+        const speechBinCount = speechHighBin - speechLowBin + 1;
+        let noiseFloor = 10;
+        let warmupFrames = 5; // First 500ms: minimum tracking to find ambient level
+        let warmupMin = Infinity;
+
         const vadData = new Uint8Array(analyser.frequencyBinCount);
         vadIntervalRef.current = setInterval(() => {
           analyser.getByteFrequencyData(vadData);
-          let sum = 0;
-          for (let i = 0; i < vadData.length; i++) sum += vadData[i];
-          const avg = sum / vadData.length;
-          const threshold = computeThreshold(sensitivityRef.current);
-          const speaking = avg > threshold;
-          setMicLevel(Math.min(100, Math.round((avg / 60) * 100)));
+
+          // Speech-band energy (200Hz–3kHz)
+          let speechEnergy = 0;
+          for (let i = speechLowBin; i <= speechHighBin; i++) {
+            speechEnergy += vadData[i];
+          }
+          speechEnergy /= speechBinCount;
+
+          // Full-band for mic level indicator
+          let fullEnergy = 0;
+          for (let i = 0; i < vadData.length; i++) fullEnergy += vadData[i];
+          const avgLevel = fullEnergy / vadData.length;
+          setMicLevel(Math.min(100, Math.round((avgLevel / 60) * 100)));
+
+          // Adaptive noise floor
+          if (warmupFrames > 0) {
+            // Warmup: minimum tracking — captures ambient level on first frame,
+            // ignores speech peaks. No false activations even during calibration.
+            warmupMin = Math.min(warmupMin, speechEnergy);
+            noiseFloor = Math.max(MIN_NOISE_FLOOR, warmupMin);
+            warmupFrames--;
+          } else if (!wasSpeakingRef.current) {
+            // Steady state: slow EMA during silence only
+            if (speechEnergy < noiseFloor) {
+              noiseFloor = noiseFloor * 0.8 + speechEnergy * 0.2;
+            } else {
+              noiseFloor = noiseFloor * 0.97 + speechEnergy * 0.03;
+            }
+            noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
+          }
+
+          // Sensitivity controls margin above adaptive noise floor
+          const margin = computeMargin(sensitivityRef.current);
+          const speaking = speechEnergy > noiseFloor + margin;
 
           if (speaking) {
             lastSpeechTimeRef.current = performance.now();
