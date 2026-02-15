@@ -92,6 +92,27 @@ const sharingSupported = typeof navigator !== 'undefined' &&
   typeof AudioEncoder !== 'undefined' &&
   typeof AudioDecoder !== 'undefined';
 
+// ── Silent WAV for mobile keepalive ─────────────────────────────
+// Programmatically build a 1-second 8kHz mono 8-bit silent WAV (~8KB).
+// Chrome's media pipeline enters a tight seek-play-end loop with 0-duration
+// WAVs, allocating C++ buffers on each iteration. 1-second duration means
+// Chrome loops once/second instead.
+function generateSilentWavDataUri() {
+  const rate = 8000, samples = 8000; // 1 second
+  const buf = new ArrayBuffer(44 + samples);
+  const v = new DataView(buf);
+  const s = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
+  s(0, 'RIFF'); v.setUint32(4, 36 + samples, true); s(8, 'WAVE');
+  s(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  s(36, 'data'); v.setUint32(40, samples, true);
+  new Uint8Array(buf, 44).fill(128); // 8-bit silence = 128
+  let bin = ''; const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return 'data:audio/wav;base64,' + btoa(bin);
+}
+const SILENT_WAV_URI = generateSilentWavDataUri();
+
 // ── Hook ────────────────────────────────────────────────────────
 
 export default function useVoice(channelId) {
@@ -312,10 +333,38 @@ export default function useVoice(channelId) {
       });
     }
 
+    // ── Lazy music playback worklet ──
+    // Only loaded on first music:started or music:chunk event.
+    let musicWorkletPromise = null;
+    async function ensureMusicPlayback() {
+      if (musicPlaybackNodeRef.current) return musicPlaybackNodeRef.current;
+      if (!musicWorkletPromise) {
+        musicWorkletPromise = (async () => {
+          const playCtx = playbackCtxRef.current;
+          if (!playCtx || cancelled) return null;
+          await playCtx.audioWorklet.addModule('/music-playback-processor.js');
+          if (cancelled) return null;
+          const node = new AudioWorkletNode(playCtx, 'music-playback-processor', {
+            outputChannelCount: [2],
+          });
+          const gain = playCtx.createGain();
+          const savedVol = localStorage.getItem('disclone_music_volume');
+          gain.gain.value = (savedVol !== null ? Number(savedVol) : 80) / 100;
+          node.connect(gain);
+          gain.connect(masterCompressorRef.current);
+          musicPlaybackNodeRef.current = node;
+          musicGainNodeRef.current = gain;
+          return node;
+        })();
+      }
+      return musicWorkletPromise;
+    }
+
     // ── Music sharing event handlers ──
 
     function handleMusicStarted({ socketId, username }) {
       setSharingUser({ socketId, username });
+      ensureMusicPlayback(); // preload worklet on share start
     }
 
     function handleMusicStopped() {
@@ -329,9 +378,9 @@ export default function useVoice(channelId) {
       }
     }
 
-    function handleMusicChunk({ data, seq }) {
-      const musicNode = musicPlaybackNodeRef.current;
-      if (!musicNode) return;
+    async function handleMusicChunk({ data, seq }) {
+      const musicNode = await ensureMusicPlayback();
+      if (!musicNode || cancelled) return;
 
       // Get or create stereo Opus decoder for music
       let decoder = musicDecoderRef.current;
@@ -393,7 +442,25 @@ export default function useVoice(channelId) {
     // ── Init ──
 
     async function init() {
+      // Emit voice:join immediately so user appears in channel list
+      // before async resource setup (worklet loads, mic permission, etc.).
+      // handleAudioChunk already has `if (!playNode) return` guard.
+      const hasOpus = typeof AudioEncoder !== 'undefined' && typeof AudioDecoder !== 'undefined';
+      console.log('[Voice] Joining', channelId);
+      socket.emit('voice:join', {
+        channelId,
+        capabilities: { opus: hasOpus },
+      }, (response) => {
+        if (response?.success && response.peers) {
+          for (const peer of response.peers) {
+            peerCapsRef.current.set(peer.socketId, peer.capabilities || {});
+          }
+          console.log('[Voice] Peer capabilities:', Object.fromEntries(peerCapsRef.current));
+        }
+      });
+
       try {
+
         // ── Master compressor for combined voice + music output ──
         const playCtx = playbackCtxRef.current;
         const masterCompressor = playCtx.createDynamicsCompressor();
@@ -407,41 +474,26 @@ export default function useVoice(channelId) {
 
         // ── Setup playback AudioWorklet ──
         await playCtx.audioWorklet.addModule('/playback-processor.js');
+        if (cancelled) return;
         const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor', {
           outputChannelCount: [2],
         });
         playbackNode.connect(masterCompressor);
         playbackNodeRef.current = playbackNode;
 
-        // ── Setup music playback AudioWorklet ──
-        await playCtx.audioWorklet.addModule('/music-playback-processor.js');
-        const musicPlaybackNode = new AudioWorkletNode(playCtx, 'music-playback-processor', {
-          outputChannelCount: [2],
-        });
-        const musicGain = playCtx.createGain();
-        const savedVol = localStorage.getItem('disclone_music_volume');
-        musicGain.gain.value = (savedVol !== null ? Number(savedVol) : 80) / 100;
-        musicPlaybackNode.connect(musicGain);
-        musicGain.connect(masterCompressor);
-        musicPlaybackNodeRef.current = musicPlaybackNode;
-        musicGainNodeRef.current = musicGain;
-
-        if (cancelled) return;
-
         // ── Mobile keepalive: silent <audio> element ──
         // Mobile browsers (iOS/Android) suspend pages when the screen locks
         // UNLESS an HTMLAudioElement is actively playing. WebAudio alone isn't enough.
         // A looping silent audio clip tells the OS "this tab is playing media".
         try {
-          // Tiny silent WAV: 1 sample, 8-bit mono, 8kHz (smallest valid WAV)
-          const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAESsAAABAAgAZGF0YQAAAAA=';
-          const audio = new Audio(silentWav);
+          const audio = new Audio(SILENT_WAV_URI);
           audio.loop = true;
           audio.volume = 0.01; // near-silent but non-zero so OS doesn't skip it
           audio.setAttribute('playsinline', '');
           await audio.play().catch(() => {}); // may need user gesture on first call
           keepaliveAudioRef.current = audio;
         } catch { /* keepalive is best-effort */ }
+        if (cancelled) return;
 
         // ── Media Session API: show "Voice Chat" on lock screen ──
         if (navigator.mediaSession) {
@@ -460,11 +512,11 @@ export default function useVoice(channelId) {
             wakeLockRef.current = await navigator.wakeLock.request('screen');
           } catch { /* wake lock is best-effort */ }
         }
+        if (cancelled) return;
 
         // ── Acquire mic ──
         if (!navigator.mediaDevices?.getUserMedia) {
           console.error('[Voice] getUserMedia not available');
-          socket.emit('voice:join', { channelId });
           return;
         }
 
@@ -574,6 +626,7 @@ export default function useVoice(channelId) {
             console.warn('[Voice] Opus not available, using PCM:', e.message);
           }
         }
+        if (cancelled) return;
 
         // ── Eagerly load RNNoise if previously enabled ──
         if (noiseSuppressionRef.current && !rnnoiseRef.current) {
@@ -734,21 +787,6 @@ export default function useVoice(channelId) {
       } catch (err) {
         console.error('[Voice] Init error:', err);
       }
-
-      if (cancelled) return;
-      console.log('[Voice] Joining', channelId);
-      const hasOpus = typeof AudioEncoder !== 'undefined' && typeof AudioDecoder !== 'undefined';
-      socket.emit('voice:join', {
-        channelId,
-        capabilities: { opus: hasOpus },
-      }, (response) => {
-        if (response?.success && response.peers) {
-          for (const peer of response.peers) {
-            peerCapsRef.current.set(peer.socketId, peer.capabilities || {});
-          }
-          console.log('[Voice] Peer capabilities:', Object.fromEntries(peerCapsRef.current));
-        }
-      });
     }
 
     init();
