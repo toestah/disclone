@@ -16,7 +16,8 @@ export async function loadRnnoise() {
     const instance = createRNNWasmModuleSync();
     // The sync loader inlines the WASM but still uses a ready promise
     const Module = await instance.ready;
-    Module._rnnoise_init();
+    // Note: do NOT call Module._rnnoise_init() — it corrupts internal state
+    // and disables denoising. _rnnoise_create() handles per-instance init.
     return Module;
   })();
   // Clear cached promise on failure so retries work
