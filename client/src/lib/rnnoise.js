@@ -51,15 +51,20 @@ export class RnnoiseDenoiser {
     const inputOffset = this._inputPtr >> 2; // byte offset → float offset
     const outputOffset = this._outputPtr >> 2;
 
-    // Copy input to WASM heap
-    heapF32.set(frame, inputOffset);
+    // RNNoise expects int16-scale values (-32768 to 32767), not float32 (-1 to 1)
+    // Scale up before processing, scale back down after
+    for (let i = 0; i < 480; i++) {
+      heapF32[inputOffset + i] = frame[i] * 32768;
+    }
 
     // Process — returns VAD probability [0, 1]
     const vadProb = M._rnnoise_process_frame(this._state, this._outputPtr, this._inputPtr);
 
-    // Copy output from WASM heap
+    // Copy output from WASM heap and scale back to float32 range
     const output = new Float32Array(480);
-    output.set(heapF32.subarray(outputOffset, outputOffset + 480));
+    for (let i = 0; i < 480; i++) {
+      output[i] = heapF32[outputOffset + i] / 32768;
+    }
 
     return { output, vadProb };
   }
