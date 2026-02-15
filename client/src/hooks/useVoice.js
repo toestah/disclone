@@ -368,9 +368,11 @@ export default function useVoice(channelId) {
               const frames = audioData.numberOfFrames;
               let left = new Float32Array(frames);
               let right = new Float32Array(frames);
-              audioData.copyTo(left, { planeIndex: 0 });
+              // Force f32-planar output — Opus decoder may output f32 (interleaved)
+              // which makes planeIndex 0 contain ALL channels interleaved
+              audioData.copyTo(left, { planeIndex: 0, format: 'f32-planar' });
               if (audioData.numberOfChannels >= 2) {
-                audioData.copyTo(right, { planeIndex: 1 });
+                audioData.copyTo(right, { planeIndex: 1, format: 'f32-planar' });
               } else {
                 right.set(left);
               }
@@ -944,9 +946,8 @@ export default function useVoice(channelId) {
     let stream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
-        audio: { suppressLocalAudioPlayback: true },
+        audio: true,
         video: true,
-        surfaceSwitching: 'include',
       });
     } catch (err) {
       // User cancelled the picker — silently return
