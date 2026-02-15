@@ -120,6 +120,10 @@ export default function useVoice(channelId) {
     const saved = localStorage.getItem('disclone_noise_suppression');
     return saved !== null ? saved === 'true' : true; // default ON
   });
+  const [sensitivityMode, setSensitivityModeState] = useState(() => {
+    const saved = localStorage.getItem('disclone_sensitivity_mode');
+    return saved === 'manual' ? 'manual' : 'auto'; // default auto
+  });
 
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -149,6 +153,9 @@ export default function useVoice(channelId) {
   const stopSharingRef = useRef(null);
   const noiseSuppressionRef = useRef(noiseSuppression);
   const rnnoiseRef = useRef(null);
+  const peerDenoisersRef = useRef(new Map());
+  const sensitivityModeRef = useRef(sensitivityMode);
+  const vadProbAccRef = useRef({ sum: 0, count: 0 });
   const keepaliveAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
 
@@ -157,11 +164,18 @@ export default function useVoice(channelId) {
   sensitivityRef.current = sensitivity;
   isSharingRef.current = isSharing;
   noiseSuppressionRef.current = noiseSuppression;
+  sensitivityModeRef.current = sensitivityMode;
 
   const setSensitivity = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
     setSensitivityState(v);
     localStorage.setItem('disclone_voice_sensitivity', String(v));
+  }, []);
+
+  const setSensitivityMode = useCallback((mode) => {
+    const m = mode === 'manual' ? 'manual' : 'auto';
+    setSensitivityModeState(m);
+    localStorage.setItem('disclone_sensitivity_mode', m);
   }, []);
 
   const setNoiseSuppression = useCallback(async (enabled) => {
@@ -172,15 +186,26 @@ export default function useVoice(channelId) {
         const module = await loadRnnoise();
         rnnoiseRef.current = new RnnoiseDenoiser(module);
         console.log('[Voice] RNNoise denoiser loaded');
+        // Create receive-side denoisers for all current peers
+        for (const peerId of peerCapsRef.current.keys()) {
+          if (!peerDenoisersRef.current.has(peerId)) {
+            peerDenoisersRef.current.set(peerId, new RnnoiseDenoiser(module));
+          }
+        }
       } catch (e) {
         console.error('[Voice] Failed to load RNNoise:', e);
         setNoiseSuppressionState(false);
         localStorage.setItem('disclone_noise_suppression', 'false');
       }
-    } else if (!enabled && rnnoiseRef.current) {
-      rnnoiseRef.current.destroy();
-      rnnoiseRef.current = null;
-      console.log('[Voice] RNNoise denoiser destroyed');
+    } else if (!enabled) {
+      if (rnnoiseRef.current) {
+        rnnoiseRef.current.destroy();
+        rnnoiseRef.current = null;
+      }
+      // Destroy all peer denoisers
+      for (const d of peerDenoisersRef.current.values()) d.destroy();
+      peerDenoisersRef.current.clear();
+      console.log('[Voice] RNNoise denoisers destroyed');
     }
   }, []);
 
@@ -238,13 +263,23 @@ export default function useVoice(channelId) {
           decoder = new AudioDecoder({
             output: (audioData) => {
               try {
+                // Extract seq from timestamp to avoid stale closure capture (Bug A fix)
+                const decodedSeq = Math.round(audioData.timestamp / 20000);
                 let pcm = new Float32Array(audioData.numberOfFrames);
                 audioData.copyTo(pcm, { planeIndex: 0 });
                 audioData.close();
+                // Receive-side denoising (at 48kHz, before resample)
+                if (noiseSuppressionRef.current) {
+                  const peerDenoiser = peerDenoisersRef.current.get(from);
+                  if (peerDenoiser) {
+                    const { pcm: denoised } = denoiseFrame(peerDenoiser, pcm, 48000);
+                    pcm = denoised;
+                  }
+                }
                 if (playRate !== 48000) {
                   pcm = resampleCubic(pcm, 48000, playRate);
                 }
-                storePcmAndPLC(from, pcm, currentSeq);
+                storePcmAndPLC(from, pcm, decodedSeq);
               } catch (e) {
                 console.error('[Voice] Decode output error:', e);
               }
@@ -278,6 +313,14 @@ export default function useVoice(channelId) {
         }
         const playRate = playbackCtxRef.current?.sampleRate || 48000;
         const srcRate = sampleRate || 48000;
+        // Receive-side denoising (at source rate, before resample)
+        if (noiseSuppressionRef.current) {
+          const peerDenoiser = peerDenoisersRef.current.get(from);
+          if (peerDenoiser) {
+            const { pcm: denoised } = denoiseFrame(peerDenoiser, pcm, srcRate);
+            pcm = denoised;
+          }
+        }
         if (srcRate !== playRate) {
           pcm = resampleCubic(pcm, srcRate, playRate);
         }
@@ -290,6 +333,14 @@ export default function useVoice(channelId) {
     function handleUserJoined({ socketId, capabilities }) {
       console.log(`[Voice] → user-joined: ${socketId}`, capabilities);
       if (capabilities) peerCapsRef.current.set(socketId, capabilities);
+      // Eagerly create receive-side denoiser for this peer
+      if (noiseSuppressionRef.current && !peerDenoisersRef.current.has(socketId)) {
+        loadRnnoise().then((module) => {
+          if (!peerDenoisersRef.current.has(socketId)) {
+            peerDenoisersRef.current.set(socketId, new RnnoiseDenoiser(module));
+          }
+        }).catch(() => {});
+      }
       playChime(playbackCtxRef, 'up');
     }
 
@@ -298,6 +349,12 @@ export default function useVoice(channelId) {
       peerCapsRef.current.delete(socketId);
       lastSeqRef.current.delete(socketId);
       lastPcmRef.current.delete(socketId);
+      // Destroy receive-side denoiser for this peer
+      const peerDenoiser = peerDenoisersRef.current.get(socketId);
+      if (peerDenoiser) {
+        peerDenoiser.destroy();
+        peerDenoisersRef.current.delete(socketId);
+      }
       playChime(playbackCtxRef, 'down');
       const decoder = decodersRef.current.get(socketId);
       if (decoder) {
@@ -569,9 +626,24 @@ export default function useVoice(channelId) {
             noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
           }
 
-          // Sensitivity controls margin above adaptive noise floor
-          const margin = computeMargin(sensitivityRef.current);
-          const speaking = speechEnergy > noiseFloor + margin;
+          // Determine speaking state based on sensitivity mode
+          let speaking;
+          if (sensitivityModeRef.current === 'auto') {
+            if (noiseSuppressionRef.current && rnnoiseRef.current) {
+              // Auto + RNNoise: use neural VAD probability (averaged over interval)
+              const acc = vadProbAccRef.current;
+              const avgVadProb = acc.count > 0 ? acc.sum / acc.count : 0;
+              vadProbAccRef.current = { sum: 0, count: 0 };
+              speaking = avgVadProb > 0.5;
+            } else {
+              // Auto without RNNoise: adaptive VAD with moderate fixed margin
+              speaking = speechEnergy > noiseFloor + 14; // margin equivalent to sensitivity 50
+            }
+          } else {
+            // Manual mode: existing behavior
+            const margin = computeMargin(sensitivityRef.current);
+            speaking = speechEnergy > noiseFloor + margin;
+          }
 
           if (speaking) {
             lastSpeechTimeRef.current = performance.now();
@@ -634,6 +706,12 @@ export default function useVoice(channelId) {
             if (!cancelled && !rnnoiseRef.current) {
               rnnoiseRef.current = new RnnoiseDenoiser(module);
               console.log('[Voice] RNNoise denoiser loaded (restored from settings)');
+              // Create peer denoisers for any already-connected peers
+              for (const peerId of peerCapsRef.current.keys()) {
+                if (!peerDenoisersRef.current.has(peerId)) {
+                  peerDenoisersRef.current.set(peerId, new RnnoiseDenoiser(module));
+                }
+              }
             }
           }).catch((e) => console.warn('[Voice] RNNoise load failed:', e));
         }
@@ -651,7 +729,10 @@ export default function useVoice(channelId) {
 
           // Apply RNNoise denoising before VAD gate (cleaner input = better VAD)
           if (noiseSuppressionRef.current && rnnoiseRef.current) {
-            pcm = denoiseFrame(rnnoiseRef.current, pcm, nativeRate);
+            const { pcm: denoised, vadProb } = denoiseFrame(rnnoiseRef.current, pcm, nativeRate);
+            pcm = denoised;
+            vadProbAccRef.current.sum += vadProb;
+            vadProbAccRef.current.count++;
           }
 
           const gateOpen = performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS;
@@ -856,6 +937,9 @@ export default function useVoice(channelId) {
         rnnoiseRef.current.destroy();
         rnnoiseRef.current = null;
       }
+      // Destroy all peer denoisers
+      for (const d of peerDenoisersRef.current.values()) d.destroy();
+      peerDenoisersRef.current.clear();
 
       if (masterCompressorRef.current) {
         masterCompressorRef.current.disconnect();
@@ -1083,6 +1167,8 @@ export default function useVoice(channelId) {
     peerStates,
     sensitivity,
     setSensitivity,
+    sensitivityMode,
+    setSensitivityMode,
     isSharing,
     sharingUser,
     startSharing,

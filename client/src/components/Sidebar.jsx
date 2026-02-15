@@ -50,6 +50,7 @@ export default function Sidebar({
 
   const {
     isMuted, isSpeaking, speakingPeers, toggleMute, micLevel, sensitivity, setSensitivity,
+    sensitivityMode, setSensitivityMode,
     isSharing, sharingUser, startSharing, stopSharing, sharingSupported, musicVolume, setMusicVolume,
     shareVolume, setShareVolume, noiseSuppression, setNoiseSuppression,
   } = voiceState || {};
@@ -315,17 +316,42 @@ export default function Sidebar({
 
             <div className="mb-1">
               <div className="flex items-center justify-between mb-1.5">
-                <label className="text-[12px] text-discord-text">Input Sensitivity</label>
-                <span className="text-[11px] text-discord-muted tabular-nums">{sensitivity ?? 50}%</span>
+                <div>
+                  <div className="text-[12px] text-discord-text">Input Sensitivity</div>
+                  <div className="text-[10px] text-discord-muted/60 mt-0.5">
+                    {(sensitivityMode ?? 'auto') === 'auto' ? 'Automatically determined' : 'Manual threshold'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSensitivityMode?.((sensitivityMode ?? 'auto') === 'auto' ? 'manual' : 'auto')}
+                  className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                    (sensitivityMode ?? 'auto') === 'auto' ? 'bg-discord-green' : 'bg-discord-muted/30'
+                  }`}
+                  title={(sensitivityMode ?? 'auto') === 'auto' ? 'Switch to manual' : 'Switch to auto'}
+                >
+                  <div
+                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                      (sensitivityMode ?? 'auto') === 'auto' ? 'translate-x-4' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={sensitivity ?? 50}
-                onChange={(e) => setSensitivity?.(Number(e.target.value))}
-                className="voice-slider w-full"
-              />
+              {(sensitivityMode ?? 'auto') === 'manual' && (
+                <div className="mt-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] text-discord-muted">Threshold</label>
+                    <span className="text-[11px] text-discord-muted tabular-nums">{sensitivity ?? 50}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={sensitivity ?? 50}
+                    onChange={(e) => setSensitivity?.(Number(e.target.value))}
+                    className="voice-slider w-full"
+                  />
+                </div>
+              )}
             </div>
 
             {/* Noise suppression toggle */}

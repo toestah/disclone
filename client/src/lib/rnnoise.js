@@ -93,10 +93,10 @@ export class RnnoiseDenoiser {
  * @param {RnnoiseDenoiser} denoiser - active denoiser instance
  * @param {Float32Array} frame - 20ms frame at inputRate
  * @param {number} inputRate - sample rate of the frame (e.g., 48000, 44100)
- * @returns {Float32Array} denoised frame at the original inputRate
+ * @returns {{ pcm: Float32Array, vadProb: number }} denoised frame + average VAD probability
  */
 export function denoiseFrame(denoiser, frame, inputRate) {
-  if (!denoiser || denoiser._destroyed) return frame;
+  if (!denoiser || denoiser._destroyed) return { pcm: frame, vadProb: 0 };
 
   // RNNoise requires 48kHz, 480-sample frames (10ms)
   const RNNOISE_RATE = 48000;
@@ -118,15 +118,19 @@ export function denoiseFrame(denoiser, frame, inputRate) {
     }
   }
 
-  // Process in 480-sample chunks
+  // Process in 480-sample chunks, accumulate VAD probability
   const numChunks = Math.floor(workFrame.length / RNNOISE_FRAME);
   const denoisedWork = new Float32Array(workFrame.length);
+  let vadProbSum = 0;
 
   for (let c = 0; c < numChunks; c++) {
     const chunk = workFrame.subarray(c * RNNOISE_FRAME, (c + 1) * RNNOISE_FRAME);
-    const { output } = denoiser.processFrame(chunk);
+    const { output, vadProb } = denoiser.processFrame(chunk);
     denoisedWork.set(output, c * RNNOISE_FRAME);
+    vadProbSum += vadProb;
   }
+
+  const avgVadProb = numChunks > 0 ? vadProbSum / numChunks : 0;
 
   // Copy any remaining samples (< 480) unprocessed
   const processed = numChunks * RNNOISE_FRAME;
@@ -146,8 +150,8 @@ export function denoiseFrame(denoiser, frame, inputRate) {
       const frac = srcIdx - idx0;
       result[i] = denoisedWork[idx0] + (denoisedWork[idx1] - denoisedWork[idx0]) * frac;
     }
-    return result;
+    return { pcm: result, vadProb: avgVadProb };
   }
 
-  return denoisedWork;
+  return { pcm: denoisedWork, vadProb: avgVadProb };
 }

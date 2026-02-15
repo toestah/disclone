@@ -9,6 +9,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this._decay = Math.exp(-1 / (sampleRate * 0.003));         // 3ms exponential decay
     this._frameSamples = Math.round(sampleRate * 0.02);        // 20ms frame for PLC
     this._maxPlcRepeats = 6;                                   // Up to 6 PLC frames (120ms)
+    this._plcFadeInLength = Math.round(sampleRate * 0.003);    // 3ms fade-in on PLC frames
 
     this.port.onmessage = (e) => {
       const { peerId, pcm, removePeer, clear } = e.data;
@@ -36,6 +37,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             // Worklet-level PLC
             lastFrame: null,       // last 20ms frame for repetition
             plcCount: 0,           // consecutive PLC frames emitted
+            plcFadeIn: 0,          // fade-in counter for PLC frames
           };
           this._peers.set(peerId, peer);
         }
@@ -49,8 +51,9 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           }
         }
 
-        // Reset PLC counter on real data
+        // Reset PLC counter and fade-in on real data
         peer.plcCount = 0;
+        peer.plcFadeIn = 0;
 
         // Store last frame for PLC (last ~20ms of incoming data)
         if (pcm.length >= this._frameSamples) {
@@ -122,33 +125,42 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             peer.fadeIn--;
           }
 
+          // PLC fade-in: smooth transition from decay into PLC data
+          if (peer.plcFadeIn > 0) {
+            sample *= 1 - (peer.plcFadeIn / this._plcFadeInLength);
+            peer.plcFadeIn--;
+          }
+
           output[i] += sample;
           peer.lastSample = sample;
           hasData = true;
-        } else if (Math.abs(peer.lastSample) > 0.0001) {
-          // Smooth exponential decay to zero when data runs out
-          peer.lastSample *= this._decay;
-          output[i] += peer.lastSample;
+        } else {
+          // Underrun — generate PLC inline so it plays THIS quantum, not next
+          if (peer.lastFrame && peer.plcCount < this._maxPlcRepeats) {
+            const gain = 1.0 - (peer.plcCount / this._maxPlcRepeats) * 0.8; // 100% → 20%
+            for (let j = 0; j < peer.lastFrame.length; j++) {
+              peer.ring[peer.w % peer.size] = peer.lastFrame[j] * gain;
+              peer.w++;
+            }
+            if (peer.w - peer.r > peer.size) {
+              peer.r = peer.w - peer.size;
+            }
+            peer.plcFadeIn = this._plcFadeInLength; // 3ms fade-in on PLC
+            peer.plcCount++;
+            // Retry this sample from the now-populated buffer
+            i--;
+            continue;
+          } else if (Math.abs(peer.lastSample) > 0.0001) {
+            // Smooth exponential decay to zero when PLC exhausted
+            peer.lastSample *= this._decay;
+            output[i] += peer.lastSample;
+          }
         }
       }
 
       if (!hasData) {
         peer.underruns++;
 
-        // Worklet-level PLC: repeat last frame with progressive fadeout
-        if (peer.lastFrame && peer.plcCount < this._maxPlcRepeats) {
-          const gain = 1.0 - (peer.plcCount / this._maxPlcRepeats) * 0.8; // 100% → 20%
-          for (let i = 0; i < peer.lastFrame.length; i++) {
-            peer.ring[peer.w % peer.size] = peer.lastFrame[i] * gain;
-            peer.w++;
-          }
-          if (peer.w - peer.r > peer.size) {
-            peer.r = peer.w - peer.size;
-          }
-          peer.plcCount++;
-        }
-
-        // Instead of hard reset, enter draining mode
         // Adaptive prefill: track underrun frequency
         if (peer.underruns === 1) {
           this._adaptPrefill(peer, now);
