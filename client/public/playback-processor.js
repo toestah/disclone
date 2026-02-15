@@ -10,22 +10,46 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this._frameSamples = Math.round(sampleRate * 0.02);        // 20ms frame for PLC
     this._maxPlcRepeats = 6;                                   // Up to 6 PLC frames (120ms)
     this._plcFadeInLength = Math.round(sampleRate * 0.003);    // 3ms fade-in on PLC frames
+    this._peerCounter = 0;                                     // for pan position assignment
+    this._comfortNoiseLevel = Math.pow(10, -45 / 20);           // -45 dBFS
+    this._comfortNoiseFadeLen = Math.round(sampleRate * 0.05);  // 50ms fade in/out
+
+    // Pre-computed pan positions: spread peers across stereo field
+    // Pattern: center, left, right, slight-left, slight-right, far-left, far-right...
+    this._panPositions = [0, -0.4, 0.4, -0.2, 0.2, -0.6, 0.6, -0.1, 0.1, -0.5, 0.5, -0.3, 0.3,
+      -0.55, 0.55, -0.15, 0.15, -0.45, 0.45, -0.35, 0.35];
 
     this.port.onmessage = (e) => {
-      const { peerId, pcm, removePeer, clear } = e.data;
+      const { peerId, pcm, removePeer, clear, setPan } = e.data;
 
       if (clear) {
         this._peers.clear();
+        this._peerCounter = 0;
         return;
       }
       if (removePeer) {
         this._peers.delete(removePeer);
         return;
       }
+      if (setPan !== undefined && peerId !== undefined) {
+        const peer = this._peers.get(peerId);
+        if (peer) {
+          // Equal-power panning: panLeft and panRight gains
+          const angle = (setPan * Math.PI) / 4; // -0.6..0.6 → -PI/4*0.6..PI/4*0.6
+          peer.panLeft = Math.cos(angle + Math.PI / 4);
+          peer.panRight = Math.sin(angle + Math.PI / 4);
+        }
+        return;
+      }
       if (pcm && peerId !== undefined) {
         let peer = this._peers.get(peerId);
         if (!peer) {
           const size = sampleRate * 2; // 2s ring buffer
+          // Assign pan position from pre-computed list
+          const panIdx = this._peerCounter % this._panPositions.length;
+          const pan = this._panPositions[panIdx];
+          const angle = (pan * Math.PI) / 4;
+          this._peerCounter++;
           peer = {
             ring: new Float32Array(size), size, w: 0, r: 0,
             started: false, underruns: 0,
@@ -38,6 +62,12 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             lastFrame: null,       // last 20ms frame for repetition
             plcCount: 0,           // consecutive PLC frames emitted
             plcFadeIn: 0,          // fade-in counter for PLC frames
+            // Stereo panning (equal-power)
+            panLeft: Math.cos(angle + Math.PI / 4),
+            panRight: Math.sin(angle + Math.PI / 4),
+            // Comfort noise
+            cnFade: 0,             // current fade position (0 = silent, fadeLen = full)
+            cnActive: false,       // whether comfort noise is active
           };
           this._peers.set(peerId, peer);
         }
@@ -93,9 +123,11 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   }
 
   process(inputs, outputs) {
-    const output = outputs[0]?.[0];
-    if (!output) return true;
-    output.fill(0);
+    const left = outputs[0]?.[0];
+    const right = outputs[0]?.[1];
+    if (!left || !right) return true;
+    left.fill(0);
+    right.fill(0);
 
     const now = currentTime; // AudioWorklet global
 
@@ -114,7 +146,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       }
 
       let hasData = false;
-      for (let i = 0; i < output.length; i++) {
+      for (let i = 0; i < left.length; i++) {
         if (peer.r < peer.w) {
           let sample = peer.ring[peer.r % peer.size];
           peer.r++;
@@ -131,7 +163,15 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             peer.plcFadeIn--;
           }
 
-          output[i] += sample;
+          // Fade out comfort noise when real data resumes
+          if (peer.cnActive) {
+            peer.cnFade = Math.max(0, peer.cnFade - 1);
+            if (peer.cnFade === 0) peer.cnActive = false;
+          }
+
+          // Stereo panning
+          left[i] += sample * peer.panLeft;
+          right[i] += sample * peer.panRight;
           peer.lastSample = sample;
           hasData = true;
         } else {
@@ -153,7 +193,19 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           } else if (Math.abs(peer.lastSample) > 0.0001) {
             // Smooth exponential decay to zero when PLC exhausted
             peer.lastSample *= this._decay;
-            output[i] += peer.lastSample;
+            left[i] += peer.lastSample * peer.panLeft;
+            right[i] += peer.lastSample * peer.panRight;
+          } else if (peer.started && !peer.draining) {
+            // Comfort noise: low-level shaped noise so channel feels "alive"
+            peer.cnActive = true;
+            peer.cnFade = Math.min(peer.cnFade + 1, this._comfortNoiseFadeLen);
+            const gain = this._comfortNoiseLevel * (peer.cnFade / this._comfortNoiseFadeLen);
+            // Simple pink-ish noise: average 2 white samples for -3dB/octave rolloff
+            const w1 = Math.random() * 2 - 1;
+            const w2 = Math.random() * 2 - 1;
+            const noise = (w1 + w2) * 0.5 * gain;
+            left[i] += noise * peer.panLeft;
+            right[i] += noise * peer.panRight;
           }
         }
       }
@@ -185,16 +237,17 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Soft clip — linear below +/-0.9, smooth saturation above
-    // Avoids harsh odd-harmonic distortion from hard clipping during multi-peer mixing
-    for (let i = 0; i < output.length; i++) {
-      const x = output[i];
-      if (x > 0.9) {
-        const over = x - 0.9;
-        output[i] = 0.9 + 0.1 * (1 - 1 / (1 + over * 10));
-      } else if (x < -0.9) {
-        const over = -x - 0.9;
-        output[i] = -0.9 - 0.1 * (1 - 1 / (1 + over * 10));
+    // Soft clip both channels — linear below +/-0.9, smooth saturation above
+    for (let i = 0; i < left.length; i++) {
+      for (const ch of [left, right]) {
+        const x = ch[i];
+        if (x > 0.9) {
+          const over = x - 0.9;
+          ch[i] = 0.9 + 0.1 * (1 - 1 / (1 + over * 10));
+        } else if (x < -0.9) {
+          const over = -x - 0.9;
+          ch[i] = -0.9 - 0.1 * (1 - 1 / (1 + over * 10));
+        }
       }
     }
 

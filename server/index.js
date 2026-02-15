@@ -72,6 +72,11 @@ const clientCapabilities = new Map();
 // Music sharers: channelId -> socketId (one sharer per room)
 const musicSharers = new Map();
 
+// Last-N speaker forwarding: only relay audio from top N active speakers
+const MAX_ACTIVE_SPEAKERS = 5;
+// channelId -> Map<socketId, startTime> (when they started speaking)
+const roomSpeakers = new Map();
+
 // DM channels: username -> Set<dmChannelId>
 const userDMChannels = new Map();
 
@@ -327,6 +332,7 @@ io.on('connection', (socket) => {
       if (room.has(socket.id)) {
         room.delete(socket.id);
         socket.leave(`voice:${roomId}`);
+        roomSpeakers.get(roomId)?.delete(socket.id);
         socket.to(`voice:${roomId}`).emit('voice:user-left', {
           channelId: roomId,
           socketId: socket.id,
@@ -399,6 +405,7 @@ io.on('connection', (socket) => {
       speakingState.delete(socket.id);
       mutedState.delete(socket.id);
       clientCapabilities.delete(socket.id);
+      roomSpeakers.get(channelId)?.delete(socket.id);
 
       socket.to(`voice:${channelId}`).emit('voice:user-left', {
         channelId,
@@ -417,6 +424,19 @@ io.on('connection', (socket) => {
 
   socket.on('voice:speaking', ({ channelId, speaking }) => {
     speakingState.set(socket.id, speaking);
+
+    // Track active speakers for last-N forwarding
+    let speakers = roomSpeakers.get(channelId);
+    if (!speakers) {
+      speakers = new Map();
+      roomSpeakers.set(channelId, speakers);
+    }
+    if (speaking) {
+      speakers.set(socket.id, Date.now());
+    } else {
+      speakers.delete(socket.id);
+    }
+
     socket.to(`voice:${channelId}`).emit('voice:speaking', {
       socketId: socket.id,
       speaking,
@@ -438,6 +458,19 @@ io.on('connection', (socket) => {
     // Only relay if sender is actually in this voice room
     const room = voiceRooms.get(channelId);
     if (!room || !room.has(socket.id)) return;
+
+    // Last-N forwarding: when room has many users, only relay top N speakers
+    if (room.size > MAX_ACTIVE_SPEAKERS) {
+      const speakers = roomSpeakers.get(channelId);
+      if (speakers && speakers.size > MAX_ACTIVE_SPEAKERS) {
+        // More speakers than slots — only relay if sender is among top N (most recent start)
+        const sorted = [...speakers.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, MAX_ACTIVE_SPEAKERS);
+        if (!sorted.some(([id]) => id === socket.id)) return;
+      }
+    }
+
     // volatile = OK to drop if transport is congested (real-time audio)
     socket.to(`voice:${channelId}`).volatile.emit('audio:chunk', {
       from: socket.id,
@@ -644,6 +677,7 @@ io.on('connection', (socket) => {
         }
 
         room.delete(socket.id);
+        roomSpeakers.get(roomId)?.delete(socket.id);
         socket.to(`voice:${roomId}`).emit('voice:user-left', {
           channelId: roomId,
           socketId: socket.id,

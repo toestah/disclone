@@ -116,12 +116,18 @@ class MusicPlaybackProcessor extends AudioWorkletProcessor {
       this._w -= off;
     }
 
-    // Soft clip
+    // Soft clip — smooth saturation above +/-0.9 (matches voice processor)
     for (let i = 0; i < outLeft.length; i++) {
-      if (outLeft[i] > 1) outLeft[i] = 1;
-      else if (outLeft[i] < -1) outLeft[i] = -1;
-      if (outRight[i] > 1) outRight[i] = 1;
-      else if (outRight[i] < -1) outRight[i] = -1;
+      for (const ch of [outLeft, outRight]) {
+        const x = ch[i];
+        if (x > 0.9) {
+          const over = x - 0.9;
+          ch[i] = 0.9 + 0.1 * (1 - 1 / (1 + over * 10));
+        } else if (x < -0.9) {
+          const over = -x - 0.9;
+          ch[i] = -0.9 - 0.1 * (1 - 1 / (1 + over * 10));
+        }
+      }
     }
 
     return true;

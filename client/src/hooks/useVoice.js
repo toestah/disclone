@@ -127,7 +127,6 @@ export default function useVoice(channelId) {
 
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
-  const vadIntervalRef = useRef(null);
   const wasSpeakingRef = useRef(false);
   const loopbackRef = useRef(null);
   const channelIdRef = useRef(channelId);
@@ -153,7 +152,6 @@ export default function useVoice(channelId) {
   const stopSharingRef = useRef(null);
   const noiseSuppressionRef = useRef(noiseSuppression);
   const rnnoiseRef = useRef(null);
-  const peerDenoisersRef = useRef(new Map());
   const sensitivityModeRef = useRef(sensitivityMode);
   const vadProbAccRef = useRef({ sum: 0, count: 0 });
   const keepaliveAudioRef = useRef(null);
@@ -186,12 +184,6 @@ export default function useVoice(channelId) {
         const module = await loadRnnoise();
         rnnoiseRef.current = new RnnoiseDenoiser(module);
         console.log('[Voice] RNNoise denoiser loaded');
-        // Create receive-side denoisers for all current peers
-        for (const peerId of peerCapsRef.current.keys()) {
-          if (!peerDenoisersRef.current.has(peerId)) {
-            peerDenoisersRef.current.set(peerId, new RnnoiseDenoiser(module));
-          }
-        }
       } catch (e) {
         console.error('[Voice] Failed to load RNNoise:', e);
         setNoiseSuppressionState(false);
@@ -202,10 +194,7 @@ export default function useVoice(channelId) {
         rnnoiseRef.current.destroy();
         rnnoiseRef.current = null;
       }
-      // Destroy all peer denoisers
-      for (const d of peerDenoisersRef.current.values()) d.destroy();
-      peerDenoisersRef.current.clear();
-      console.log('[Voice] RNNoise denoisers destroyed');
+      console.log('[Voice] RNNoise denoiser destroyed');
     }
   }, []);
 
@@ -268,14 +257,6 @@ export default function useVoice(channelId) {
                 let pcm = new Float32Array(audioData.numberOfFrames);
                 audioData.copyTo(pcm, { planeIndex: 0 });
                 audioData.close();
-                // Receive-side denoising (at 48kHz, before resample)
-                if (noiseSuppressionRef.current) {
-                  const peerDenoiser = peerDenoisersRef.current.get(from);
-                  if (peerDenoiser) {
-                    const { pcm: denoised } = denoiseFrame(peerDenoiser, pcm, 48000);
-                    pcm = denoised;
-                  }
-                }
                 if (playRate !== 48000) {
                   pcm = resampleCubic(pcm, 48000, playRate);
                 }
@@ -313,14 +294,6 @@ export default function useVoice(channelId) {
         }
         const playRate = playbackCtxRef.current?.sampleRate || 48000;
         const srcRate = sampleRate || 48000;
-        // Receive-side denoising (at source rate, before resample)
-        if (noiseSuppressionRef.current) {
-          const peerDenoiser = peerDenoisersRef.current.get(from);
-          if (peerDenoiser) {
-            const { pcm: denoised } = denoiseFrame(peerDenoiser, pcm, srcRate);
-            pcm = denoised;
-          }
-        }
         if (srcRate !== playRate) {
           pcm = resampleCubic(pcm, srcRate, playRate);
         }
@@ -333,14 +306,6 @@ export default function useVoice(channelId) {
     function handleUserJoined({ socketId, capabilities }) {
       console.log(`[Voice] → user-joined: ${socketId}`, capabilities);
       if (capabilities) peerCapsRef.current.set(socketId, capabilities);
-      // Eagerly create receive-side denoiser for this peer
-      if (noiseSuppressionRef.current && !peerDenoisersRef.current.has(socketId)) {
-        loadRnnoise().then((module) => {
-          if (!peerDenoisersRef.current.has(socketId)) {
-            peerDenoisersRef.current.set(socketId, new RnnoiseDenoiser(module));
-          }
-        }).catch(() => {});
-      }
       playChime(playbackCtxRef, 'up');
     }
 
@@ -349,12 +314,6 @@ export default function useVoice(channelId) {
       peerCapsRef.current.delete(socketId);
       lastSeqRef.current.delete(socketId);
       lastPcmRef.current.delete(socketId);
-      // Destroy receive-side denoiser for this peer
-      const peerDenoiser = peerDenoisersRef.current.get(socketId);
-      if (peerDenoiser) {
-        peerDenoiser.destroy();
-        peerDenoisersRef.current.delete(socketId);
-      }
       playChime(playbackCtxRef, 'down');
       const decoder = decodersRef.current.get(socketId);
       if (decoder) {
@@ -471,7 +430,9 @@ export default function useVoice(channelId) {
 
         // ── Setup playback AudioWorklet ──
         await playCtx.audioWorklet.addModule('/playback-processor.js');
-        const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor');
+        const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor', {
+          outputChannelCount: [2],
+        });
         playbackNode.connect(masterCompressor);
         playbackNodeRef.current = playbackNode;
 
@@ -541,8 +502,8 @@ export default function useVoice(channelId) {
         }
         localStreamRef.current = stream;
 
-        // ── Capture AudioContext (device default rate) ──
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // ── Capture AudioContext (force 48kHz — always hits RNNoise fast path) ──
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
         const nativeRate = audioCtx.sampleRate;
         console.log('[Voice] AudioContext at', nativeRate, 'Hz');
         audioContextRef.current = audioCtx;
@@ -593,70 +554,7 @@ export default function useVoice(channelId) {
         let warmupMin = Infinity;
 
         const vadData = new Uint8Array(analyser.frequencyBinCount);
-        vadIntervalRef.current = setInterval(() => {
-          analyser.getByteFrequencyData(vadData);
-
-          // Speech-band energy (200Hz–3kHz)
-          let speechEnergy = 0;
-          for (let i = speechLowBin; i <= speechHighBin; i++) {
-            speechEnergy += vadData[i];
-          }
-          speechEnergy /= speechBinCount;
-
-          // Full-band for mic level indicator
-          let fullEnergy = 0;
-          for (let i = 0; i < vadData.length; i++) fullEnergy += vadData[i];
-          const avgLevel = fullEnergy / vadData.length;
-          setMicLevel(Math.min(100, Math.round((avgLevel / 60) * 100)));
-
-          // Adaptive noise floor
-          if (warmupFrames > 0) {
-            // Warmup: minimum tracking — captures ambient level on first frame,
-            // ignores speech peaks. No false activations even during calibration.
-            warmupMin = Math.min(warmupMin, speechEnergy);
-            noiseFloor = Math.max(MIN_NOISE_FLOOR, warmupMin);
-            warmupFrames--;
-          } else if (!wasSpeakingRef.current) {
-            // Steady state: slow EMA during silence only
-            if (speechEnergy < noiseFloor) {
-              noiseFloor = noiseFloor * 0.8 + speechEnergy * 0.2;
-            } else {
-              noiseFloor = noiseFloor * 0.97 + speechEnergy * 0.03;
-            }
-            noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
-          }
-
-          // Determine speaking state based on sensitivity mode
-          let speaking;
-          if (sensitivityModeRef.current === 'auto') {
-            if (noiseSuppressionRef.current && rnnoiseRef.current) {
-              // Auto + RNNoise: use neural VAD probability (averaged over interval)
-              const acc = vadProbAccRef.current;
-              const avgVadProb = acc.count > 0 ? acc.sum / acc.count : 0;
-              vadProbAccRef.current = { sum: 0, count: 0 };
-              speaking = avgVadProb > 0.5;
-            } else {
-              // Auto without RNNoise: adaptive VAD with moderate fixed margin
-              speaking = speechEnergy > noiseFloor + 14; // margin equivalent to sensitivity 50
-            }
-          } else {
-            // Manual mode: existing behavior
-            const margin = computeMargin(sensitivityRef.current);
-            speaking = speechEnergy > noiseFloor + margin;
-          }
-
-          if (speaking) {
-            lastSpeechTimeRef.current = performance.now();
-          }
-          if (speaking !== wasSpeakingRef.current) {
-            wasSpeakingRef.current = speaking;
-            setIsSpeaking(speaking);
-            socket.emit('voice:speaking', {
-              channelId: channelIdRef.current,
-              speaking,
-            });
-          }
-        }, 100);
+        let micLevelCounter = 0; // throttle mic level UI updates
 
         // ── Opus encoder (WebCodecs) ──
         let useOpus = false;
@@ -669,7 +567,7 @@ export default function useVoice(channelId) {
               codec: 'opus',
               sampleRate: 48000,
               numberOfChannels: 1,
-              bitrate: 32000,
+              bitrate: 64000,
             };
             const support = await AudioEncoder.isConfigSupported(config);
             if (support.supported) {
@@ -706,12 +604,6 @@ export default function useVoice(channelId) {
             if (!cancelled && !rnnoiseRef.current) {
               rnnoiseRef.current = new RnnoiseDenoiser(module);
               console.log('[Voice] RNNoise denoiser loaded (restored from settings)');
-              // Create peer denoisers for any already-connected peers
-              for (const peerId of peerCapsRef.current.keys()) {
-                if (!peerDenoisersRef.current.has(peerId)) {
-                  peerDenoisersRef.current.set(peerId, new RnnoiseDenoiser(module));
-                }
-              }
             }
           }).catch((e) => console.warn('[Voice] RNNoise load failed:', e));
         }
@@ -733,6 +625,66 @@ export default function useVoice(channelId) {
             pcm = denoised;
             vadProbAccRef.current.sum += vadProb;
             vadProbAccRef.current.count++;
+          }
+
+          // ── Inline VAD (every 20ms frame instead of 100ms polling) ──
+          analyser.getByteFrequencyData(vadData);
+
+          let speechEnergy = 0;
+          for (let i = speechLowBin; i <= speechHighBin; i++) {
+            speechEnergy += vadData[i];
+          }
+          speechEnergy /= speechBinCount;
+
+          // Throttle mic level indicator (~100ms = every 5th frame)
+          if (++micLevelCounter >= 5) {
+            micLevelCounter = 0;
+            let fullEnergy = 0;
+            for (let i = 0; i < vadData.length; i++) fullEnergy += vadData[i];
+            const avgLevel = fullEnergy / vadData.length;
+            setMicLevel(Math.min(100, Math.round((avgLevel / 60) * 100)));
+          }
+
+          // Adaptive noise floor
+          if (warmupFrames > 0) {
+            warmupMin = Math.min(warmupMin, speechEnergy);
+            noiseFloor = Math.max(MIN_NOISE_FLOOR, warmupMin);
+            warmupFrames--;
+          } else if (!wasSpeakingRef.current) {
+            if (speechEnergy < noiseFloor) {
+              noiseFloor = noiseFloor * 0.8 + speechEnergy * 0.2;
+            } else {
+              noiseFloor = noiseFloor * 0.97 + speechEnergy * 0.03;
+            }
+            noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
+          }
+
+          // Determine speaking state
+          let speaking;
+          if (sensitivityModeRef.current === 'auto') {
+            if (noiseSuppressionRef.current && rnnoiseRef.current) {
+              const acc = vadProbAccRef.current;
+              const avgVadProb = acc.count > 0 ? acc.sum / acc.count : 0;
+              vadProbAccRef.current = { sum: 0, count: 0 };
+              speaking = avgVadProb > 0.5;
+            } else {
+              speaking = speechEnergy > noiseFloor + 14;
+            }
+          } else {
+            const margin = computeMargin(sensitivityRef.current);
+            speaking = speechEnergy > noiseFloor + margin;
+          }
+
+          if (speaking) {
+            lastSpeechTimeRef.current = performance.now();
+          }
+          if (speaking !== wasSpeakingRef.current) {
+            wasSpeakingRef.current = speaking;
+            setIsSpeaking(speaking);
+            socket.emit('voice:speaking', {
+              channelId: channelIdRef.current,
+              speaking,
+            });
           }
 
           const gateOpen = performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS;
@@ -922,7 +874,6 @@ export default function useVoice(channelId) {
         playbackNodeRef.current.disconnect();
         playbackNodeRef.current = null;
       }
-      if (vadIntervalRef.current) clearInterval(vadIntervalRef.current);
       if (loopbackRef.current) {
         loopbackRef.current.disconnect();
         loopbackRef.current = null;
@@ -937,9 +888,6 @@ export default function useVoice(channelId) {
         rnnoiseRef.current.destroy();
         rnnoiseRef.current = null;
       }
-      // Destroy all peer denoisers
-      for (const d of peerDenoisersRef.current.values()) d.destroy();
-      peerDenoisersRef.current.clear();
 
       if (masterCompressorRef.current) {
         masterCompressorRef.current.disconnect();
