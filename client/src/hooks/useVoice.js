@@ -117,7 +117,8 @@ export default function useVoice(channelId) {
     return saved !== null ? Number(saved) : 100;
   });
   const [noiseSuppression, setNoiseSuppressionState] = useState(() => {
-    return localStorage.getItem('disclone_noise_suppression') === 'true';
+    const saved = localStorage.getItem('disclone_noise_suppression');
+    return saved !== null ? saved === 'true' : true; // default ON
   });
 
   const localStreamRef = useRef(null);
@@ -148,6 +149,8 @@ export default function useVoice(channelId) {
   const stopSharingRef = useRef(null);
   const noiseSuppressionRef = useRef(noiseSuppression);
   const rnnoiseRef = useRef(null);
+  const keepaliveAudioRef = useRef(null);
+  const wakeLockRef = useRef(null);
 
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
@@ -430,6 +433,39 @@ export default function useVoice(channelId) {
 
         if (cancelled) return;
 
+        // ── Mobile keepalive: silent <audio> element ──
+        // Mobile browsers (iOS/Android) suspend pages when the screen locks
+        // UNLESS an HTMLAudioElement is actively playing. WebAudio alone isn't enough.
+        // A looping silent audio clip tells the OS "this tab is playing media".
+        try {
+          // Tiny silent WAV: 1 sample, 8-bit mono, 8kHz (smallest valid WAV)
+          const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAESsAAABAAgAZGF0YQAAAAA=';
+          const audio = new Audio(silentWav);
+          audio.loop = true;
+          audio.volume = 0.01; // near-silent but non-zero so OS doesn't skip it
+          audio.setAttribute('playsinline', '');
+          await audio.play().catch(() => {}); // may need user gesture on first call
+          keepaliveAudioRef.current = audio;
+        } catch { /* keepalive is best-effort */ }
+
+        // ── Media Session API: show "Voice Chat" on lock screen ──
+        if (navigator.mediaSession) {
+          try {
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: 'Voice Chat',
+              artist: channelId,
+            });
+            navigator.mediaSession.playbackState = 'playing';
+          } catch { /* best-effort */ }
+        }
+
+        // ── Wake Lock API: prevent screen from auto-dimming ──
+        if (navigator.wakeLock) {
+          try {
+            wakeLockRef.current = await navigator.wakeLock.request('screen');
+          } catch { /* wake lock is best-effort */ }
+        }
+
         // ── Acquire mic ──
         if (!navigator.mediaDevices?.getUserMedia) {
           console.error('[Voice] getUserMedia not available');
@@ -706,6 +742,25 @@ export default function useVoice(channelId) {
 
     init();
 
+    // ── Visibility change: resume audio + re-acquire wake lock on return ──
+    function handleVisibilityChange() {
+      if (document.visibilityState !== 'visible') return;
+      // Resume AudioContexts that may have been suspended while backgrounded
+      if (audioContextRef.current?.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {});
+      }
+      if (playbackCtxRef.current?.state === 'suspended') {
+        playbackCtxRef.current.resume().catch(() => {});
+      }
+      // Re-acquire wake lock (auto-released when page goes hidden)
+      if (navigator.wakeLock && !wakeLockRef.current) {
+        navigator.wakeLock.request('screen')
+          .then((lock) => { wakeLockRef.current = lock; })
+          .catch(() => {});
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     // ── Cleanup ──
     return () => {
       cancelled = true;
@@ -750,6 +805,24 @@ export default function useVoice(channelId) {
         musicGainNodeRef.current = null;
       }
       setSharingUser(null);
+
+      // ── Clean up mobile keepalive ──
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (keepaliveAudioRef.current) {
+        keepaliveAudioRef.current.pause();
+        keepaliveAudioRef.current.src = '';
+        keepaliveAudioRef.current = null;
+      }
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => {});
+        wakeLockRef.current = null;
+      }
+      if (navigator.mediaSession) {
+        try {
+          navigator.mediaSession.metadata = null;
+          navigator.mediaSession.playbackState = 'none';
+        } catch { /* ignore */ }
+      }
 
       playChime(playbackCtxRef, 'down');
       socket.emit('voice:leave', { channelId });

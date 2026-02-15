@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { SocketProvider, useSocket } from './hooks/useSocket.jsx';
 import useVoice from './hooks/useVoice.js';
 import LoginScreen from './components/LoginScreen.jsx';
@@ -20,6 +20,11 @@ function AppContent() {
     const saved = localStorage.getItem('disclone_user_status');
     return saved || 'online';
   });
+
+  // Voice reconnect refs
+  const voiceChannelRef = useRef(null);
+  const isReconnectRef = useRef(false);
+  useEffect(() => { voiceChannelRef.current = voiceChannel; }, [voiceChannel]);
 
   // DM state
   const [dmChannels, setDmChannels] = useState([]);
@@ -63,6 +68,13 @@ function AppContent() {
                 });
               }
             });
+            // Auto-rejoin voice channel on reconnect
+            if (isReconnectRef.current && voiceChannelRef.current) {
+              const savedVC = voiceChannelRef.current;
+              setVoiceChannel(null);
+              setTimeout(() => setVoiceChannel(savedVC), 200);
+            }
+            isReconnectRef.current = true;
           }
         });
       }

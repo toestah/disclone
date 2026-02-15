@@ -11,8 +11,9 @@ export function SocketProvider({ children }) {
     const socket = io({
       autoConnect: true,
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 10000,
     });
 
     socket.on('connect', () => setConnected(true));
