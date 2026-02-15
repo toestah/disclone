@@ -943,7 +943,11 @@ export default function useVoice(channelId) {
 
     let stream;
     try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        audio: { suppressLocalAudioPlayback: true },
+        video: true,
+        surfaceSwitching: 'include',
+      });
     } catch (err) {
       // User cancelled the picker — silently return
       if (err.name === 'NotAllowedError') return;
@@ -958,7 +962,13 @@ export default function useVoice(channelId) {
 
     const audioTracks = stream.getAudioTracks();
     if (audioTracks.length === 0) {
-      alert('The selected source has no audio. Please share a tab or window with audio.');
+      alert(
+        'No audio track found.\n\n' +
+        'To share audio:\n' +
+        '1. Select a Chrome TAB (not a window or screen)\n' +
+        '2. Make sure "Share tab audio" is checked\n\n' +
+        'Note: On macOS, only tab sharing supports audio.'
+      );
       stream.getTracks().forEach((t) => t.stop());
       return;
     }
