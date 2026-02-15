@@ -146,8 +146,7 @@ export default function useVoice(channelId) {
   const musicGainNodeRef = useRef(null);
   const shareGainNodeRef = useRef(null);
   const masterCompressorRef = useRef(null);
-  const lastSeqRef = useRef(new Map());
-  const lastPcmRef = useRef(new Map());
+  const musicPlanarBufRef = useRef(null);
   const isSharingRef = useRef(false);
   const stopSharingRef = useRef(null);
   const noiseSuppressionRef = useRef(noiseSuppression);
@@ -222,28 +221,8 @@ export default function useVoice(channelId) {
       const playNode = playbackNodeRef.current;
       if (!playNode) return;
 
-      // ── Packet Loss Concealment (PLC) ──
-      // Track sequence numbers per peer; repeat last frame for gaps
-      function storePcmAndPLC(peerId, pcm, currentSeq) {
-        const lastSeq = lastSeqRef.current.get(peerId);
-        const lastPcm = lastPcmRef.current.get(peerId);
-        if (lastSeq !== undefined && lastPcm && currentSeq > lastSeq + 1) {
-          const missed = Math.min(currentSeq - lastSeq - 1, 6); // cap at 6 repeats
-          for (let i = 0; i < missed; i++) {
-            const gain = 1.0 - (i / 6) * 0.8; // progressive fadeout: 100% → 20%
-            const repeated = new Float32Array(lastPcm.length);
-            for (let j = 0; j < lastPcm.length; j++) {
-              repeated[j] = lastPcm[j] * gain;
-            }
-            playNode.port.postMessage({ peerId, pcm: repeated }, [repeated.buffer]);
-          }
-        }
-        lastSeqRef.current.set(peerId, currentSeq);
-        lastPcmRef.current.set(peerId, new Float32Array(pcm));
-        playNode.port.postMessage({ peerId, pcm }, [pcm.buffer]);
-      }
-
-      const currentSeq = seq || 0;
+      // PLC is handled entirely by the playback worklet (inline frame repetition
+      // with progressive fadeout + fade-in). No main-thread PLC needed.
 
       if (codec === 'opus' && typeof AudioDecoder !== 'undefined') {
         let decoder = decodersRef.current.get(from);
@@ -252,15 +231,13 @@ export default function useVoice(channelId) {
           decoder = new AudioDecoder({
             output: (audioData) => {
               try {
-                // Extract seq from timestamp to avoid stale closure capture (Bug A fix)
-                const decodedSeq = Math.round(audioData.timestamp / 20000);
                 let pcm = new Float32Array(audioData.numberOfFrames);
                 audioData.copyTo(pcm, { planeIndex: 0 });
                 audioData.close();
                 if (playRate !== 48000) {
                   pcm = resampleCubic(pcm, 48000, playRate);
                 }
-                storePcmAndPLC(from, pcm, decodedSeq);
+                playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
               } catch (e) {
                 console.error('[Voice] Decode output error:', e);
               }
@@ -276,7 +253,7 @@ export default function useVoice(channelId) {
         try {
           const chunk = new EncodedAudioChunk({
             type: 'key',
-            timestamp: currentSeq * 20000,
+            timestamp: (seq || 0) * 20000,
             data,
           });
           decoder.decode(chunk);
@@ -297,7 +274,7 @@ export default function useVoice(channelId) {
         if (srcRate !== playRate) {
           pcm = resampleCubic(pcm, srcRate, playRate);
         }
-        storePcmAndPLC(from, pcm, currentSeq);
+        playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
       }
     }
 
@@ -312,8 +289,6 @@ export default function useVoice(channelId) {
     function handleUserLeft({ socketId }) {
       console.log(`[Voice] → user-left: ${socketId}`);
       peerCapsRef.current.delete(socketId);
-      lastSeqRef.current.delete(socketId);
-      lastPcmRef.current.delete(socketId);
       playChime(playbackCtxRef, 'down');
       const decoder = decodersRef.current.get(socketId);
       if (decoder) {
@@ -667,7 +642,8 @@ export default function useVoice(channelId) {
             if (noiseSuppressionRef.current && rnnoiseRef.current) {
               const acc = vadProbAccRef.current;
               const avgVadProb = acc.count > 0 ? acc.sum / acc.count : 0;
-              vadProbAccRef.current = { sum: 0, count: 0 };
+              acc.sum = 0;
+              acc.count = 0;
               speaking = avgVadProb > 0.5;
             } else {
               speaking = speechEnergy > noiseFloor + 14;
@@ -896,8 +872,7 @@ export default function useVoice(channelId) {
         masterCompressorRef.current = null;
       }
       shareGainNodeRef.current = null;
-      lastSeqRef.current.clear();
-      lastPcmRef.current.clear();
+      musicPlanarBufRef.current = null;
       peerCapsRef.current.clear();
       wasSpeakingRef.current = false;
       lastSpeechTimeRef.current = 0;
@@ -1024,8 +999,13 @@ export default function useVoice(channelId) {
         if (!left || !right) return;
         if (!musicEncoderRef.current || musicEncoderRef.current.state !== 'configured') return;
         try {
-          // Interleave into planar AudioData (left plane then right plane)
-          const planarData = new Float32Array(left.length + right.length);
+          // Reuse planar buffer across frames (AudioData constructor copies from it)
+          const totalLen = left.length + right.length;
+          let planarData = musicPlanarBufRef.current;
+          if (!planarData || planarData.length !== totalLen) {
+            planarData = new Float32Array(totalLen);
+            musicPlanarBufRef.current = planarData;
+          }
           planarData.set(left, 0);
           planarData.set(right, left.length);
           const audioData = new AudioData({

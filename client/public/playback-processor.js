@@ -59,7 +59,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             underrunHistory: [],   // timestamps of recent underruns
             draining: false,       // draining mode instead of hard reset
             // Worklet-level PLC
-            lastFrame: null,       // last 20ms frame for repetition
+            lastFrame: new Float32Array(this._frameSamples), // pre-allocated 20ms frame
+            lastFrameLen: 0,       // actual length of data in lastFrame
             plcCount: 0,           // consecutive PLC frames emitted
             plcFadeIn: 0,          // fade-in counter for PLC frames
             // Stereo panning (equal-power)
@@ -85,11 +86,13 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         peer.plcCount = 0;
         peer.plcFadeIn = 0;
 
-        // Store last frame for PLC (last ~20ms of incoming data)
+        // Store last frame for PLC (last ~20ms of incoming data) — reuse pre-allocated buffer
         if (pcm.length >= this._frameSamples) {
-          peer.lastFrame = pcm.slice(pcm.length - this._frameSamples);
+          peer.lastFrame.set(pcm.subarray(pcm.length - this._frameSamples));
+          peer.lastFrameLen = this._frameSamples;
         } else {
-          peer.lastFrame = new Float32Array(pcm);
+          peer.lastFrame.set(pcm);
+          peer.lastFrameLen = pcm.length;
         }
 
         for (let i = 0; i < pcm.length; i++) {
@@ -176,9 +179,9 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           hasData = true;
         } else {
           // Underrun — generate PLC inline so it plays THIS quantum, not next
-          if (peer.lastFrame && peer.plcCount < this._maxPlcRepeats) {
+          if (peer.lastFrameLen > 0 && peer.plcCount < this._maxPlcRepeats) {
             const gain = 1.0 - (peer.plcCount / this._maxPlcRepeats) * 0.8; // 100% → 20%
-            for (let j = 0; j < peer.lastFrame.length; j++) {
+            for (let j = 0; j < peer.lastFrameLen; j++) {
               peer.ring[peer.w % peer.size] = peer.lastFrame[j] * gain;
               peer.w++;
             }
