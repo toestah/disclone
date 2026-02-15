@@ -6,16 +6,21 @@ let modulePromise = null;
 
 /**
  * Lazy-load the RNNoise WASM module (singleton).
- * Uses the async loader — only loaded when noise suppression is first enabled.
+ * Uses the sync version with inlined base64 WASM to avoid file-serving issues in Vite.
+ * The "sync" loader still returns a ready promise but doesn't need to fetch any files.
  */
 export async function loadRnnoise() {
   if (modulePromise) return modulePromise;
   modulePromise = (async () => {
-    const { createRNNWasmModule } = await import('@jitsi/rnnoise-wasm');
-    const Module = await createRNNWasmModule();
+    const { createRNNWasmModuleSync } = await import('@jitsi/rnnoise-wasm');
+    const instance = createRNNWasmModuleSync();
+    // The sync loader inlines the WASM but still uses a ready promise
+    const Module = await instance.ready;
     Module._rnnoise_init();
     return Module;
   })();
+  // Clear cached promise on failure so retries work
+  modulePromise.catch(() => { modulePromise = null; });
   return modulePromise;
 }
 
