@@ -1,0 +1,61 @@
+{
+  "description": "Voice test fixtures — synthetic speech-like signals at 48kHz for pipeline testing",
+  "sampleRate": 48000,
+  "format": "float32 raw (.f32)",
+  "clips": [
+    {
+      "id": "male-low",
+      "gender": "male",
+      "accent": "neutral",
+      "duration": 3.0,
+      "fundamental": 110,
+      "file": "male-low.f32",
+      "description": "Low male voice (110Hz fundamental, 8 harmonics)"
+    },
+    {
+      "id": "male-mid",
+      "gender": "male",
+      "accent": "neutral",
+      "duration": 3.0,
+      "fundamental": 150,
+      "file": "male-mid.f32",
+      "description": "Mid male voice (150Hz fundamental, 8 harmonics)"
+    },
+    {
+      "id": "female-mid",
+      "gender": "female",
+      "accent": "neutral",
+      "duration": 3.0,
+      "fundamental": 220,
+      "file": "female-mid.f32",
+      "description": "Mid female voice (220Hz fundamental, 8 harmonics)"
+    },
+    {
+      "id": "female-high",
+      "gender": "female",
+      "accent": "neutral",
+      "duration": 3.0,
+      "fundamental": 280,
+      "file": "female-high.f32",
+      "description": "High female voice (280Hz fundamental, 8 harmonics)"
+    },
+    {
+      "id": "accented-low",
+      "gender": "male",
+      "accent": "varied",
+      "duration": 3.0,
+      "fundamental": 130,
+      "file": "accented-low.f32",
+      "description": "Accented low voice with formant shifts (130Hz fundamental)"
+    },
+    {
+      "id": "accented-high",
+      "gender": "female",
+      "accent": "varied",
+      "duration": 3.0,
+      "fundamental": 250,
+      "file": "accented-high.f32",
+      "description": "Accented high voice with formant shifts (250Hz fundamental)"
+    }
+  ]
+}

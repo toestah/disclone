@@ -48,7 +48,7 @@ function verdict(metric, value) {
  * @returns {Object} { metrics, spectral, report, hasFailures }
  */
 export function analyze(resultsDir) {
-  const metrics = { signals: {}, load_test: null, vad: null };
+  const metrics = { signals: {}, load_test: null, vad: null, voice_quality: null };
   const spectral = {};
   let hasFailures = false;
   let hasWarnings = false;
@@ -151,6 +151,17 @@ export function analyze(resultsDir) {
       if (data.expectGate === 'closed' && data.new.falseActivationPct > 0) {
         hasWarnings = true;
       }
+    }
+  }
+
+  // ── Voice quality test results ──
+  const voicePath = `${resultsDir}/voice-quality.json`;
+  if (existsSync(voicePath)) {
+    const voiceData = JSON.parse(readFileSync(voicePath, 'utf-8'));
+    metrics.voice_quality = voiceData;
+
+    for (const [, data] of Object.entries(voiceData)) {
+      if (data.pass === false) hasFailures = true;
     }
   }
 
@@ -283,6 +294,30 @@ function generateReport(metrics, spectral, hasFailures, hasWarnings) {
     }
     lines.push('');
     lines.push('**VAD thresholds**: noise-only false activation <5% = PASS, speech detection >80% = PASS');
+    lines.push('');
+  }
+
+  // ── Voice Quality Test ──
+  if (metrics.voice_quality) {
+    lines.push('## Voice Quality Test (Real Voice + Network Simulation)');
+    lines.push('');
+    lines.push('| Condition | Loss | Jitter | Avg SNR (dB) | Dropouts | Total Gap (ms) | Delivery (%) | Spectral | Verdict |');
+    lines.push('|-----------|------|--------|-------------|----------|----------------|-------------|----------|---------|');
+
+    for (const [condName, data] of Object.entries(metrics.voice_quality)) {
+      const passStr = data.pass === true ? 'PASS' : data.pass === false ? 'FAIL' : 'N/A';
+      lines.push(
+        `| ${condName} | ${(data.packetLoss * 100).toFixed(0)}% | ${data.jitterMs}ms | ${data.avgSnrDb} | ${data.totalDropouts} | ${data.totalGapMs} | ${data.avgDeliveryPct} | ${data.avgSpectralPreservation} | **${passStr}** |`
+      );
+    }
+    lines.push('');
+
+    // Show thresholds
+    lines.push('**Voice quality thresholds**:');
+    lines.push('- ideal: SNR >80dB, 0 dropouts');
+    lines.push('- 5% loss: SNR >70dB, <3 dropouts, <100ms gap');
+    lines.push('- 20ms jitter: 0 dropouts (within 80ms prefill)');
+    lines.push('- 100ms jitter: <5 dropouts (adaptive prefill reaches 100-120ms)');
     lines.push('');
   }
 

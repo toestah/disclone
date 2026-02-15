@@ -8,6 +8,7 @@ import { execSync } from 'child_process';
 import { runQualityTest } from './quality-test.js';
 import { runLoadTest } from './load-test.js';
 import { runVadTest } from './vad-test.js';
+import { runVoiceQualityTest } from './voice-quality-test.js';
 import { analyze } from './analyze.js';
 
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3001';
@@ -15,6 +16,7 @@ const START_SERVER = process.argv.includes('--start-server');
 const SKIP_LOAD = process.argv.includes('--skip-load');
 const SKIP_QUALITY = process.argv.includes('--skip-quality');
 const SKIP_VAD = process.argv.includes('--skip-vad');
+const SKIP_VOICE = process.argv.includes('--skip-voice');
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -57,6 +59,7 @@ async function main() {
     skipLoad: SKIP_LOAD,
     skipQuality: SKIP_QUALITY,
     skipVad: SKIP_VAD,
+    skipVoice: SKIP_VOICE,
   };
   writeFileSync(`${resultsDir}/meta.json`, JSON.stringify(meta, null, 2));
 
@@ -119,6 +122,12 @@ async function main() {
     if (!SKIP_QUALITY) {
       console.log('\n[Run] ═══ Quality Test ═══');
       await runQualityTest(resultsDir);
+    }
+
+    // ── Run voice quality test ──
+    if (!SKIP_VOICE) {
+      console.log('\n[Run] ═══ Voice Quality Test ═══');
+      await runVoiceQualityTest(resultsDir);
     }
 
     // ── Run analysis ──

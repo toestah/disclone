@@ -51,7 +51,7 @@ export default function Sidebar({
   const {
     isMuted, isSpeaking, speakingPeers, toggleMute, micLevel, sensitivity, setSensitivity,
     isSharing, sharingUser, startSharing, stopSharing, sharingSupported, musicVolume, setMusicVolume,
-    shareVolume, setShareVolume,
+    shareVolume, setShareVolume, noiseSuppression, setNoiseSuppression,
   } = voiceState || {};
 
   const [showSettings, setShowSettings] = useState(false);
@@ -326,6 +326,28 @@ export default function Sidebar({
                 onChange={(e) => setSensitivity?.(Number(e.target.value))}
                 className="voice-slider w-full"
               />
+            </div>
+
+            {/* Noise suppression toggle */}
+            <div className="mt-3 pt-3 border-t border-white/5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-[12px] text-discord-text">Noise Suppression</div>
+                  <div className="text-[10px] text-discord-muted/60 mt-0.5">AI-powered background noise removal</div>
+                </div>
+                <button
+                  onClick={() => setNoiseSuppression?.(!noiseSuppression)}
+                  className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                    noiseSuppression ? 'bg-discord-green' : 'bg-discord-muted/30'
+                  }`}
+                >
+                  <div
+                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                      noiseSuppression ? 'translate-x-4' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
             </div>
 
             {/* Mic level indicator — only shown when in voice */}

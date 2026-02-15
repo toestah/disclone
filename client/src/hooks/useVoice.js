@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSocket } from './useSocket.jsx';
+import { loadRnnoise, RnnoiseDenoiser, denoiseFrame } from '../lib/rnnoise.js';
 
 // ── Audio chimes ────────────────────────────────────────────────
 
@@ -54,25 +55,35 @@ function computeMargin(sensitivity) {
   return Math.round(3 + 22 * (1 - sensitivity / 100));
 }
 
-function resampleLinear(input, fromRate, toRate) {
+function resampleCubic(input, fromRate, toRate) {
   if (fromRate === toRate) return input;
   const ratio = fromRate / toRate;
   const outLen = Math.round(input.length / ratio);
   const output = new Float32Array(outLen);
+  const last = input.length - 1;
   for (let i = 0; i < outLen; i++) {
     const srcIdx = i * ratio;
-    const idx0 = Math.floor(srcIdx);
-    const idx1 = Math.min(idx0 + 1, input.length - 1);
-    const frac = srcIdx - idx0;
-    output[i] = input[idx0] + (input[idx1] - input[idx0]) * frac;
+    const idx1 = Math.floor(srcIdx);
+    const frac = srcIdx - idx1;
+    // Catmull-Rom spline: 4-point interpolation
+    const idx0 = Math.max(idx1 - 1, 0);
+    const idx2 = Math.min(idx1 + 1, last);
+    const idx3 = Math.min(idx1 + 2, last);
+    const p0 = input[idx0], p1 = input[idx1], p2 = input[idx2], p3 = input[idx3];
+    // Catmull-Rom coefficients
+    const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+    const b = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3;
+    const c = -0.5 * p0 + 0.5 * p2;
+    const d = p1;
+    output[i] = ((a * frac + b) * frac + c) * frac + d;
   }
   return output;
 }
 
 function resampleStereo(left, right, fromRate, toRate) {
   return {
-    left: resampleLinear(left, fromRate, toRate),
-    right: resampleLinear(right, fromRate, toRate),
+    left: resampleCubic(left, fromRate, toRate),
+    right: resampleCubic(right, fromRate, toRate),
   };
 }
 
@@ -105,6 +116,9 @@ export default function useVoice(channelId) {
     const saved = localStorage.getItem('disclone_share_volume');
     return saved !== null ? Number(saved) : 100;
   });
+  const [noiseSuppression, setNoiseSuppressionState] = useState(() => {
+    return localStorage.getItem('disclone_noise_suppression') === 'true';
+  });
 
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -132,16 +146,39 @@ export default function useVoice(channelId) {
   const lastPcmRef = useRef(new Map());
   const isSharingRef = useRef(false);
   const stopSharingRef = useRef(null);
+  const noiseSuppressionRef = useRef(noiseSuppression);
+  const rnnoiseRef = useRef(null);
 
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
   sensitivityRef.current = sensitivity;
   isSharingRef.current = isSharing;
+  noiseSuppressionRef.current = noiseSuppression;
 
   const setSensitivity = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
     setSensitivityState(v);
     localStorage.setItem('disclone_voice_sensitivity', String(v));
+  }, []);
+
+  const setNoiseSuppression = useCallback(async (enabled) => {
+    setNoiseSuppressionState(enabled);
+    localStorage.setItem('disclone_noise_suppression', String(enabled));
+    if (enabled && !rnnoiseRef.current) {
+      try {
+        const module = await loadRnnoise();
+        rnnoiseRef.current = new RnnoiseDenoiser(module);
+        console.log('[Voice] RNNoise denoiser loaded');
+      } catch (e) {
+        console.error('[Voice] Failed to load RNNoise:', e);
+        setNoiseSuppressionState(false);
+        localStorage.setItem('disclone_noise_suppression', 'false');
+      }
+    } else if (!enabled && rnnoiseRef.current) {
+      rnnoiseRef.current.destroy();
+      rnnoiseRef.current = null;
+      console.log('[Voice] RNNoise denoiser destroyed');
+    }
   }, []);
 
   useEffect(() => {
@@ -174,9 +211,13 @@ export default function useVoice(channelId) {
         const lastSeq = lastSeqRef.current.get(peerId);
         const lastPcm = lastPcmRef.current.get(peerId);
         if (lastSeq !== undefined && lastPcm && currentSeq > lastSeq + 1) {
-          const missed = Math.min(currentSeq - lastSeq - 1, 3); // cap at 3 repeats
+          const missed = Math.min(currentSeq - lastSeq - 1, 6); // cap at 6 repeats
           for (let i = 0; i < missed; i++) {
-            const repeated = new Float32Array(lastPcm);
+            const gain = 1.0 - (i / 6) * 0.8; // progressive fadeout: 100% → 20%
+            const repeated = new Float32Array(lastPcm.length);
+            for (let j = 0; j < lastPcm.length; j++) {
+              repeated[j] = lastPcm[j] * gain;
+            }
             playNode.port.postMessage({ peerId, pcm: repeated }, [repeated.buffer]);
           }
         }
@@ -198,7 +239,7 @@ export default function useVoice(channelId) {
                 audioData.copyTo(pcm, { planeIndex: 0 });
                 audioData.close();
                 if (playRate !== 48000) {
-                  pcm = resampleLinear(pcm, 48000, playRate);
+                  pcm = resampleCubic(pcm, 48000, playRate);
                 }
                 storePcmAndPLC(from, pcm, currentSeq);
               } catch (e) {
@@ -235,7 +276,7 @@ export default function useVoice(channelId) {
         const playRate = playbackCtxRef.current?.sampleRate || 48000;
         const srcRate = sampleRate || 48000;
         if (srcRate !== playRate) {
-          pcm = resampleLinear(pcm, srcRate, playRate);
+          pcm = resampleCubic(pcm, srcRate, playRate);
         }
         storePcmAndPLC(from, pcm, currentSeq);
       }
@@ -551,6 +592,16 @@ export default function useVoice(channelId) {
           }
         }
 
+        // ── Eagerly load RNNoise if previously enabled ──
+        if (noiseSuppressionRef.current && !rnnoiseRef.current) {
+          loadRnnoise().then((module) => {
+            if (!cancelled && !rnnoiseRef.current) {
+              rnnoiseRef.current = new RnnoiseDenoiser(module);
+              console.log('[Voice] RNNoise denoiser loaded (restored from settings)');
+            }
+          }).catch((e) => console.warn('[Voice] RNNoise load failed:', e));
+        }
+
         // ── Handle frames from capture worklet ──
         let frameTimestamp = 0;
         let gateWasOpen = false;
@@ -560,7 +611,12 @@ export default function useVoice(channelId) {
 
         captureNode.port.onmessage = (e) => {
           if (isMutedRef.current || cancelled) return;
-          const { pcm } = e.data;
+          let { pcm } = e.data;
+
+          // Apply RNNoise denoising before VAD gate (cleaner input = better VAD)
+          if (noiseSuppressionRef.current && rnnoiseRef.current) {
+            pcm = denoiseFrame(rnnoiseRef.current, pcm, nativeRate);
+          }
 
           const gateOpen = performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS;
           let frame;
@@ -721,6 +777,11 @@ export default function useVoice(channelId) {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
         localStreamRef.current = null;
+      }
+
+      if (rnnoiseRef.current) {
+        rnnoiseRef.current.destroy();
+        rnnoiseRef.current = null;
       }
 
       if (masterCompressorRef.current) {
@@ -958,5 +1019,7 @@ export default function useVoice(channelId) {
     setMusicVolume,
     shareVolume,
     setShareVolume,
+    noiseSuppression,
+    setNoiseSuppression,
   };
 }
