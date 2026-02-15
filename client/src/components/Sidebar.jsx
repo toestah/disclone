@@ -5,6 +5,7 @@ const STATUS_CONFIG = {
   away: { label: 'Away', color: 'bg-discord-yellow', textColor: 'text-discord-yellow' },
   busy: { label: 'Do Not Disturb', color: 'bg-discord-red', textColor: 'text-discord-red' },
   invisible: { label: 'Invisible', color: 'bg-discord-muted/60', textColor: 'text-discord-muted' },
+  offline: { label: 'Offline', color: 'bg-discord-muted/60', textColor: 'text-discord-muted' },
 };
 
 function StatusDot({ status, className = '' }) {
@@ -40,6 +41,9 @@ export default function Sidebar({
   onLogout,
   userStatus,
   onStatusChange,
+  dmChannels,
+  activeDM,
+  onDMSelect,
 }) {
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
@@ -179,6 +183,38 @@ export default function Sidebar({
             );
           })}
         </div>
+
+        {/* Direct Messages */}
+        {dmChannels && dmChannels.length > 0 && (
+          <>
+            <div className="px-1.5 mb-1 mt-4">
+              <span className="text-[11px] font-bold text-discord-muted uppercase tracking-wide">
+                Direct Messages
+              </span>
+            </div>
+            <div className="space-y-px mb-4">
+              {dmChannels.map((dm) => (
+                <button
+                  key={dm.id}
+                  onClick={() => onDMSelect?.(dm.id)}
+                  className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
+                    activeDM === dm.id
+                      ? 'bg-discord-active text-white'
+                      : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+                  }`}
+                >
+                  <div
+                    className="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-white text-[10px] font-bold"
+                    style={{ backgroundColor: dm.avatarColor }}
+                  >
+                    {dm.username[0].toUpperCase()}
+                  </div>
+                  <span className="text-[15px] font-medium truncate">{dm.username}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Voice connection panel — shown when in a voice channel */}

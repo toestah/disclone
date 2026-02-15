@@ -31,6 +31,7 @@ const io = new Server(httpServer, {
   cors: {
     origin: '*',
   },
+  maxHttpBufferSize: 5e6, // 5MB for image attachments
 });
 
 // ── In-Memory State ──────────────────────────────────────────────
@@ -70,6 +71,9 @@ const clientCapabilities = new Map();
 
 // Music sharers: channelId -> socketId (one sharer per room)
 const musicSharers = new Map();
+
+// DM channels: username -> Set<dmChannelId>
+const userDMChannels = new Map();
 
 let messageIdCounter = 0;
 
@@ -144,6 +148,33 @@ function getVoiceRoomMembers(channelId) {
   return members;
 }
 
+// ── DM Helpers ───────────────────────────────────────────────────
+
+function getDMChannelId(user1, user2) {
+  return `dm:${[user1, user2].sort().join(':')}`;
+}
+
+function getDMParticipants(dmChannelId) {
+  return dmChannelId.slice(3).split(':');
+}
+
+function getUserDMList(username) {
+  const dmIds = userDMChannels.get(username);
+  if (!dmIds) return [];
+  const result = [];
+  for (const dmId of dmIds) {
+    const participants = getDMParticipants(dmId);
+    const otherUser = participants.find((u) => u !== username);
+    const userData = registeredUsers.get(otherUser);
+    result.push({
+      id: dmId,
+      username: otherUser,
+      avatarColor: userData?.avatarColor || '#5865f2',
+    });
+  }
+  return result;
+}
+
 // ── Socket.IO ────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
@@ -201,12 +232,19 @@ io.on('connection', (socket) => {
       }
     }
 
+    // Auto-join all DM socket rooms
+    const dmList = getUserDMList(trimmed);
+    for (const dm of dmList) {
+      socket.join(dm.id);
+    }
+
     const userEntry = registeredUsers.get(trimmed);
     callback({
       success: true,
       user: { username: trimmed, avatarColor, status: userEntry?.status || 'online' },
       channels,
       voiceState,
+      dmChannels: dmList,
     });
   });
 
@@ -234,19 +272,36 @@ io.on('connection', (socket) => {
     io.emit('users:update', getAllUsersForBroadcast());
   });
 
-  socket.on('message:send', ({ channelId, content }) => {
+  socket.on('message:send', ({ channelId, content, attachments }) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
-    if (!content || content.trim().length === 0) return;
-    if (content.length > 2000) return;
+
+    // Validate attachments
+    let validAttachments = [];
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      if (attachments.length > 5) return; // max 5 images
+      for (const att of attachments) {
+        if (att.type !== 'image' || typeof att.data !== 'string') return;
+        if (!att.data.startsWith('data:image/')) return;
+        if (att.data.length > 2.8e6) return; // ~2.8MB base64
+        validAttachments.push({ type: att.type, data: att.data });
+      }
+    }
+
+    const trimmedContent = content ? content.trim() : '';
+    if (!trimmedContent && validAttachments.length === 0) return;
+    if (trimmedContent.length > 2000) return;
 
     const message = {
       id: String(++messageIdCounter),
       username: session.username,
       avatarColor: session.avatarColor,
-      content: content.trim(),
+      content: trimmedContent,
       timestamp: Date.now(),
     };
+    if (validAttachments.length > 0) {
+      message.attachments = validAttachments;
+    }
 
     const history = messageHistory.get(channelId);
     if (history) {
@@ -440,6 +495,113 @@ io.on('connection', (socket) => {
         seq,
       });
     });
+  });
+
+  // ── Direct Messages ──
+
+  socket.on('dm:open', ({ targetUsername }, callback) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return callback?.({ success: false, error: 'Not logged in' });
+    if (targetUsername === session.username) return callback?.({ success: false, error: 'Cannot DM yourself' });
+    if (!registeredUsers.has(targetUsername)) return callback?.({ success: false, error: 'User not found' });
+
+    const dmChannelId = getDMChannelId(session.username, targetUsername);
+
+    // Initialize message history if new
+    if (!messageHistory.has(dmChannelId)) {
+      messageHistory.set(dmChannelId, []);
+    }
+
+    // Add to both users' DM lists
+    if (!userDMChannels.has(session.username)) userDMChannels.set(session.username, new Set());
+    if (!userDMChannels.has(targetUsername)) userDMChannels.set(targetUsername, new Set());
+    userDMChannels.get(session.username).add(dmChannelId);
+    userDMChannels.get(targetUsername).add(dmChannelId);
+
+    // Join socket room
+    socket.join(dmChannelId);
+
+    // Also join target's socket if they're online
+    for (const [sid, sess] of activeSessions) {
+      if (sess.username === targetUsername) {
+        io.sockets.sockets.get(sid)?.join(dmChannelId);
+        // Notify target about the new DM
+        io.to(sid).emit('dm:opened', {
+          id: dmChannelId,
+          username: session.username,
+          avatarColor: session.avatarColor,
+        });
+      }
+    }
+
+    const history = messageHistory.get(dmChannelId) || [];
+    const targetData = registeredUsers.get(targetUsername);
+    callback?.({
+      success: true,
+      dmChannel: {
+        id: dmChannelId,
+        username: targetUsername,
+        avatarColor: targetData?.avatarColor || '#5865f2',
+      },
+      messages: history.slice(-100),
+    });
+  });
+
+  socket.on('dm:send', ({ dmChannelId, content, attachments }) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return;
+
+    // Validate sender is a participant
+    const participants = getDMParticipants(dmChannelId);
+    if (!participants.includes(session.username)) return;
+
+    // Validate attachments
+    let validAttachments = [];
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      if (attachments.length > 5) return;
+      for (const att of attachments) {
+        if (att.type !== 'image' || typeof att.data !== 'string') return;
+        if (!att.data.startsWith('data:image/')) return;
+        if (att.data.length > 2.8e6) return;
+        validAttachments.push({ type: att.type, data: att.data });
+      }
+    }
+
+    const trimmedContent = content ? content.trim() : '';
+    if (!trimmedContent && validAttachments.length === 0) return;
+    if (trimmedContent.length > 2000) return;
+
+    const message = {
+      id: String(++messageIdCounter),
+      username: session.username,
+      avatarColor: session.avatarColor,
+      content: trimmedContent,
+      timestamp: Date.now(),
+    };
+    if (validAttachments.length > 0) {
+      message.attachments = validAttachments;
+    }
+
+    if (!messageHistory.has(dmChannelId)) {
+      messageHistory.set(dmChannelId, []);
+    }
+    const history = messageHistory.get(dmChannelId);
+    history.push(message);
+    if (history.length > 500) history.splice(0, history.length - 500);
+
+    io.to(dmChannelId).emit('dm:new', { dmChannelId, message });
+  });
+
+  socket.on('dm:join', ({ dmChannelId }, callback) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return callback?.({ success: false });
+
+    const participants = getDMParticipants(dmChannelId);
+    if (!participants.includes(session.username)) return callback?.({ success: false });
+
+    socket.join(dmChannelId);
+    const history = messageHistory.get(dmChannelId) || [];
+    callback?.({ success: true, messages: history.slice(-100) });
   });
 
   // ── User Status ──

@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { StatusDot } from './Sidebar.jsx';
+import ContextMenu from './ContextMenu.jsx';
 
 const STATUS_GROUPS = [
   { key: 'online', label: 'Online' },
@@ -8,8 +9,20 @@ const STATUS_GROUPS = [
   { key: 'offline', label: 'Offline' },
 ];
 
-export default function MemberList({ users }) {
+export default function MemberList({ users, currentUser, onOpenDM }) {
   const [collapsed, setCollapsed] = useState({});
+  const [contextMenu, setContextMenu] = useState(null);
+
+  const handleContextMenu = useCallback((e, user) => {
+    e.preventDefault();
+    if (user.username === currentUser) return;
+    setContextMenu({ x: e.clientX, y: e.clientY, user });
+  }, [currentUser]);
+
+  const handleClick = useCallback((e, user) => {
+    if (user.username === currentUser) return;
+    setContextMenu({ x: e.clientX, y: e.clientY, user });
+  }, [currentUser]);
 
   const grouped = {};
   for (const group of STATUS_GROUPS) {
@@ -50,6 +63,8 @@ export default function MemberList({ users }) {
                   {groupUsers.map((user) => (
                     <div
                       key={user.socketId || user.username}
+                      onClick={(e) => handleClick(e, user)}
+                      onContextMenu={(e) => handleContextMenu(e, user)}
                       className={`flex items-center gap-3 px-2 py-1.5 rounded hover:bg-discord-hover/60 transition-colors cursor-pointer group ${
                         key === 'offline' ? 'opacity-50' : ''
                       }`}
@@ -76,6 +91,24 @@ export default function MemberList({ users }) {
           );
         })}
       </div>
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          items={[
+            {
+              label: 'Message',
+              icon: (
+                <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                  <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z" />
+                </svg>
+              ),
+              onClick: () => onOpenDM?.(contextMenu.user.username),
+            },
+          ]}
+        />
+      )}
     </div>
   );
 }

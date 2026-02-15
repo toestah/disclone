@@ -14,6 +14,7 @@
   --color-discord-hover: #35373c;
   --color-discord-active: #404249;
   --color-discord-border: #3f4147;
+  --color-discord-link: #00a8fc;
 }
 
 /* Tailwind's Preflight (in @layer base) already resets margin/padding/box-sizing.

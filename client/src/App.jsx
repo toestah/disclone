@@ -21,6 +21,10 @@ function AppContent() {
     return saved || 'online';
   });
 
+  // DM state
+  const [dmChannels, setDmChannels] = useState([]);
+  const [activeDM, setActiveDM] = useState(null); // null = text channel, dmChannelId = DM view
+
   // Auto-login from localStorage when socket connects
   useEffect(() => {
     if (!socket || !connected) return;
@@ -35,6 +39,7 @@ function AppContent() {
           if (response.success) {
             setUser(response.user);
             setChannels(response.channels);
+            if (response.dmChannels) setDmChannels(response.dmChannels);
             // Restore saved status
             const savedStatus = localStorage.getItem('disclone_user_status') || 'online';
             setUserStatusState(savedStatus);
@@ -89,14 +94,34 @@ function AppContent() {
       });
     };
 
+    const handleDMNew = ({ dmChannelId, message }) => {
+      setMessages((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(dmChannelId) || [];
+        next.set(dmChannelId, [...existing, message]);
+        return next;
+      });
+    };
+
+    const handleDMOpened = (dmChannel) => {
+      setDmChannels((prev) => {
+        if (prev.some((d) => d.id === dmChannel.id)) return prev;
+        return [...prev, dmChannel];
+      });
+    };
+
     socket.on('users:update', handleUsersUpdate);
     socket.on('message:new', handleNewMessage);
     socket.on('voice:room-update', handleVoiceRoomUpdate);
+    socket.on('dm:new', handleDMNew);
+    socket.on('dm:opened', handleDMOpened);
 
     return () => {
       socket.off('users:update', handleUsersUpdate);
       socket.off('message:new', handleNewMessage);
       socket.off('voice:room-update', handleVoiceRoomUpdate);
+      socket.off('dm:new', handleDMNew);
+      socket.off('dm:opened', handleDMOpened);
     };
   }, [socket]);
 
@@ -108,6 +133,7 @@ function AppContent() {
         if (response.success) {
           setUser(response.user);
           setChannels(response.channels);
+          if (response.dmChannels) setDmChannels(response.dmChannels);
           localStorage.setItem(
             'disclone_session',
             JSON.stringify({ username: response.user.username, password: password || null })
@@ -149,6 +175,7 @@ function AppContent() {
       const channel = channels.find((c) => c.id === channelId);
       if (!channel || channel.type !== 'text') return;
 
+      setActiveDM(null); // clear DM view
       setActiveChannel(channelId);
       socket.emit('channel:join', { channelId }, (response) => {
         if (response?.success) {
@@ -164,11 +191,63 @@ function AppContent() {
   );
 
   const handleSendMessage = useCallback(
-    (content) => {
+    (content, attachments) => {
       if (!socket) return;
-      socket.emit('message:send', { channelId: activeChannel, content });
+      socket.emit('message:send', { channelId: activeChannel, content, attachments });
     },
     [socket, activeChannel]
+  );
+
+  // ── DM Handlers ──
+
+  const handleOpenDM = useCallback(
+    (targetUsername) => {
+      if (!socket) return;
+      socket.emit('dm:open', { targetUsername }, (response) => {
+        if (response?.success) {
+          const { dmChannel, messages: dmMessages } = response;
+          // Add to DM list if not already there
+          setDmChannels((prev) => {
+            if (prev.some((d) => d.id === dmChannel.id)) return prev;
+            return [...prev, dmChannel];
+          });
+          // Store messages
+          setMessages((prev) => {
+            const next = new Map(prev);
+            next.set(dmChannel.id, dmMessages);
+            return next;
+          });
+          setActiveDM(dmChannel.id);
+        }
+      });
+    },
+    [socket]
+  );
+
+  const handleDMSelect = useCallback(
+    (dmChannelId) => {
+      if (!socket) return;
+      setActiveDM(dmChannelId);
+      // Fetch latest messages
+      socket.emit('dm:join', { dmChannelId }, (response) => {
+        if (response?.success) {
+          setMessages((prev) => {
+            const next = new Map(prev);
+            next.set(dmChannelId, response.messages);
+            return next;
+          });
+        }
+      });
+    },
+    [socket]
+  );
+
+  const handleSendDM = useCallback(
+    (content, attachments) => {
+      if (!socket || !activeDM) return;
+      socket.emit('dm:send', { dmChannelId: activeDM, content, attachments });
+    },
+    [socket, activeDM]
   );
 
   const handleLogout = useCallback(() => {
@@ -183,6 +262,8 @@ function AppContent() {
     setMessages(new Map());
     setChannels([]);
     setActiveChannel('general');
+    setActiveDM(null);
+    setDmChannels([]);
     setLoginError('');
     if (socket) {
       socket.connect();
@@ -225,11 +306,14 @@ function AppContent() {
     ? channels.find((c) => c.id === voiceChannel)
     : null;
 
+  // Find DM target username for header
+  const activeDMInfo = activeDM ? dmChannels.find((d) => d.id === activeDM) : null;
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <Sidebar
         channels={channels}
-        activeChannel={activeChannel}
+        activeChannel={activeDM ? null : activeChannel}
         voiceChannel={voiceChannel}
         voiceMembers={voiceMembers}
         onChannelSelect={handleChannelSelect}
@@ -241,18 +325,36 @@ function AppContent() {
         onLogout={handleLogout}
         userStatus={userStatus}
         onStatusChange={handleStatusChange}
+        dmChannels={dmChannels}
+        activeDM={activeDM}
+        onDMSelect={handleDMSelect}
       />
       <main className="flex-1 flex flex-col bg-discord-chat min-w-0">
-        {currentChannel?.type === 'text' && (
+        {activeDM && activeDMInfo ? (
           <TextChannel
-            channel={currentChannel}
-            messages={messages.get(activeChannel) || []}
-            onSendMessage={handleSendMessage}
+            channel={{ id: activeDM, name: activeDMInfo.username }}
+            messages={messages.get(activeDM) || []}
+            onSendMessage={handleSendDM}
             user={user}
+            isDM
+            dmTarget={activeDMInfo.username}
           />
+        ) : (
+          currentChannel?.type === 'text' && (
+            <TextChannel
+              channel={currentChannel}
+              messages={messages.get(activeChannel) || []}
+              onSendMessage={handleSendMessage}
+              user={user}
+            />
+          )
         )}
       </main>
-      <MemberList users={onlineUsers} />
+      <MemberList
+        users={onlineUsers}
+        currentUser={user.username}
+        onOpenDM={handleOpenDM}
+      />
     </div>
   );
 }
