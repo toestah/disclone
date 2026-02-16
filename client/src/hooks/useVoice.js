@@ -41,7 +41,7 @@ function playChime(ctxRef, direction) {
 
 // ── Constants ───────────────────────────────────────────────────
 
-const GATE_HOLD_MS = 300;
+const GATE_HOLD_MS = 400;
 const MIN_NOISE_FLOOR = 3;
 
 /**
@@ -559,9 +559,9 @@ export default function useVoice(channelId) {
         if (cancelled) return;
 
         // ── Voice processing chain ──
-        // Minimal chain: HP filter for rumble, then straight to capture.
-        // Browser's getUserMedia already provides echoCancellation + noiseSuppression + autoGainControl.
-        // No lowpass (was 12kHz, muffled sibilants) and no compressor (caused pumping/feedback loops).
+        // "FM Radio" broadcast chain: HP → presence boost → gentle compressor → capture.
+        // Browser's getUserMedia provides echoCancellation + noiseSuppression + autoGainControl.
+        // RNNoise adds deep noise suppression on top.
         const micSource = audioCtx.createMediaStreamSource(stream);
 
         const highPass = audioCtx.createBiquadFilter();
@@ -569,15 +569,33 @@ export default function useVoice(channelId) {
         highPass.frequency.value = 80;
         highPass.Q.value = 0.707;
 
+        // Presence boost — 3kHz peak adds vocal clarity
+        const presence = audioCtx.createBiquadFilter();
+        presence.type = 'peaking';
+        presence.frequency.value = 3000;
+        presence.Q.value = 1.0;
+        presence.gain.value = 3;
+
+        // Gentle broadcast compressor — consistent levels without pumping.
+        // Soft knee + moderate ratio keeps speech natural while smoothing dynamics.
+        const compressor = audioCtx.createDynamicsCompressor();
+        compressor.threshold.value = -24;
+        compressor.knee.value = 12;
+        compressor.ratio.value = 3;
+        compressor.attack.value = 0.01;
+        compressor.release.value = 0.2;
+
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 1024;
         analyser.smoothingTimeConstant = 0.5;
 
         const captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
 
-        // Chain: mic → HP → captureNode (pass-through) → analyser → silent output
+        // Chain: mic → HP → presence → compressor → captureNode → analyser → silent output
         micSource.connect(highPass);
-        highPass.connect(captureNode);
+        highPass.connect(presence);
+        presence.connect(compressor);
+        compressor.connect(captureNode);
         captureNode.connect(analyser);
         const silentGain = audioCtx.createGain();
         silentGain.gain.value = 0.00001;
@@ -659,8 +677,8 @@ export default function useVoice(channelId) {
         let frameTimestamp = 0;
         let gateWasOpen = false;
         let fadeOutRemaining = 0;
-        const FADE_OUT_FRAMES = 3; // 3 × 20ms = 60ms fade-out
-        const FADE_IN_SAMPLES = Math.round(nativeRate * 0.005); // 5ms fade-in
+        const FADE_OUT_FRAMES = 5; // 5 × 20ms = 100ms fade-out
+        const FADE_IN_SAMPLES = Math.round(nativeRate * 0.008); // 8ms fade-in
 
         captureNode.port.onmessage = (e) => {
           if (isMutedRef.current || cancelled) return;

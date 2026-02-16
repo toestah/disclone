@@ -2,8 +2,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._peers = new Map();
-    this._basePrefillSamples = Math.round(sampleRate * 0.08); // 80ms base prefill
-    this._maxPrefillSamples = Math.round(sampleRate * 0.15);  // 150ms cap
+    this._basePrefillSamples = Math.round(sampleRate * 0.15); // 150ms base prefill
+    this._maxPrefillSamples = Math.round(sampleRate * 0.3);  // 300ms cap
     this._prefillStep = Math.round(sampleRate * 0.02);        // 20ms increment per repeated underrun
     this._fadeInLength = Math.round(sampleRate * 0.005);       // 5ms fade-in
     this._decay = Math.exp(-1 / (sampleRate * 0.003));         // 3ms exponential decay
@@ -13,6 +13,15 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this._peerCounter = 0;                                     // for pan position assignment
     this._comfortNoiseLevel = Math.pow(10, -45 / 20);           // -45 dBFS
     this._comfortNoiseFadeLen = Math.round(sampleRate * 0.05);  // 50ms fade in/out
+
+    // PLC lowpass coefficients — progressively filter repeated frames
+    // so they sound like natural trail-off instead of robotic repetition.
+    // Cutoff halves each frame: 6kHz → 3kHz → 1.5kHz → 750Hz → ...
+    this._plcLpCoeffs = [];
+    for (let i = 0; i < this._maxPlcRepeats; i++) {
+      const fc = 6000 / Math.pow(2, i);
+      this._plcLpCoeffs.push(1 - Math.exp(-2 * Math.PI * fc / sampleRate));
+    }
 
     // Pre-computed pan positions: spread peers across stereo field
     // Pattern: center, left, right, slight-left, slight-right, far-left, far-right...
@@ -63,6 +72,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             lastFrameLen: 0,       // actual length of data in lastFrame
             plcCount: 0,           // consecutive PLC frames emitted
             plcFadeIn: 0,          // fade-in counter for PLC frames
+            plcLpState: 0,         // 1-pole lowpass state for PLC smoothing
             // Stereo panning (equal-power)
             panLeft: Math.cos(angle + Math.PI / 4),
             panRight: Math.sin(angle + Math.PI / 4),
@@ -82,9 +92,10 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           }
         }
 
-        // Reset PLC counter and fade-in on real data
+        // Reset PLC counter and state on real data
         peer.plcCount = 0;
         peer.plcFadeIn = 0;
+        peer.plcLpState = 0;
 
         // Store last frame for PLC (last ~20ms of incoming data) — reuse pre-allocated buffer
         if (pcm.length >= this._frameSamples) {
@@ -180,11 +191,17 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         } else {
           // Underrun — generate PLC inline so it plays THIS quantum, not next
           if (peer.lastFrameLen > 0 && peer.plcCount < this._maxPlcRepeats) {
-            const gain = 1.0 - (peer.plcCount / this._maxPlcRepeats) * 0.8; // 100% → 20%
+            // Exponential gain decay + progressive lowpass → natural trail-off
+            const gain = Math.pow(0.75, peer.plcCount + 1);
+            const alpha = this._plcLpCoeffs[peer.plcCount];
+            let lpState = peer.plcLpState;
             for (let j = 0; j < peer.lastFrameLen; j++) {
-              peer.ring[peer.w % peer.size] = peer.lastFrame[j] * gain;
+              const sample = peer.lastFrame[j] * gain;
+              lpState += alpha * (sample - lpState);
+              peer.ring[peer.w % peer.size] = lpState;
               peer.w++;
             }
+            peer.plcLpState = lpState;
             if (peer.w - peer.r > peer.size) {
               peer.r = peer.w - peer.size;
             }
