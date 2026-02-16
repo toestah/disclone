@@ -174,6 +174,7 @@ export default function useVoice(channelId) {
   const rnnoiseRef = useRef(null);
   const sensitivityModeRef = useRef(sensitivityMode);
   const vadProbAccRef = useRef({ sum: 0, count: 0 });
+  const musicAnalyserRef = useRef(null);
   const keepaliveAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
 
@@ -350,8 +351,15 @@ export default function useVoice(channelId) {
           const gain = playCtx.createGain();
           const savedVol = localStorage.getItem('disclone_music_volume');
           gain.gain.value = (savedVol !== null ? Number(savedVol) : 80) / 100;
+          const analyser = playCtx.createAnalyser();
+          analyser.fftSize = 128;
+          analyser.smoothingTimeConstant = 0.7;
+          analyser.minDecibels = -90;
+          analyser.maxDecibels = -10;
           node.connect(gain);
-          gain.connect(masterCompressorRef.current);
+          gain.connect(analyser);
+          analyser.connect(masterCompressorRef.current);
+          musicAnalyserRef.current = analyser;
           musicPlaybackNodeRef.current = node;
           musicGainNodeRef.current = gain;
           return node;
@@ -863,6 +871,7 @@ export default function useVoice(channelId) {
         musicGainNodeRef.current.disconnect();
         musicGainNodeRef.current = null;
       }
+      musicAnalyserRef.current = null;
       setSharingUser(null);
 
       // ── Clean up mobile keepalive ──
@@ -1024,8 +1033,15 @@ export default function useVoice(channelId) {
       shareGainNodeRef.current = shareGain;
       const silentGain = musicCtx.createGain();
       silentGain.gain.value = 0.00001;
+      const shareAnalyser = musicCtx.createAnalyser();
+      shareAnalyser.fftSize = 128;
+      shareAnalyser.smoothingTimeConstant = 0.7;
+      shareAnalyser.minDecibels = -90;
+      shareAnalyser.maxDecibels = -10;
       source.connect(shareGain);
-      shareGain.connect(captureNode);
+      shareGain.connect(shareAnalyser);
+      shareAnalyser.connect(captureNode);
+      musicAnalyserRef.current = shareAnalyser;
       captureNode.connect(silentGain);
       silentGain.connect(musicCtx.destination);
 
@@ -1129,6 +1145,7 @@ export default function useVoice(channelId) {
       musicStreamRef.current.getTracks().forEach((t) => t.stop());
       musicStreamRef.current = null;
     }
+    musicAnalyserRef.current = null;
     setIsSharing(false);
     isSharingRef.current = false;
     setSharingUser(null);
@@ -1178,5 +1195,6 @@ export default function useVoice(channelId) {
     setShareVolume,
     noiseSuppression,
     setNoiseSuppression,
+    musicAnalyserRef,
   };
 }

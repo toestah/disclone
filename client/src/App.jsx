@@ -5,6 +5,9 @@ import LoginScreen from './components/LoginScreen.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import TextChannel from './components/TextChannel.jsx';
 import MemberList from './components/MemberList.jsx';
+import MobileTabBar from './components/MobileTabBar.jsx';
+import MobileVoiceView from './components/MobileVoiceView.jsx';
+import MobileProfileView from './components/MobileProfileView.jsx';
 
 function AppContent() {
   const { socket, connected } = useSocket();
@@ -29,6 +32,9 @@ function AppContent() {
   // DM state
   const [dmChannels, setDmChannels] = useState([]);
   const [activeDM, setActiveDM] = useState(null); // null = text channel, dmChannelId = DM view
+
+  // Mobile tab state
+  const [mobileTab, setMobileTab] = useState('chat');
 
   // Auto-login from localStorage when socket connects
   useEffect(() => {
@@ -189,6 +195,7 @@ function AppContent() {
 
       setActiveDM(null); // clear DM view
       setActiveChannel(channelId);
+      setMobileTab('chat');
       socket.emit('channel:join', { channelId }, (response) => {
         if (response?.success) {
           setMessages((prev) => {
@@ -240,6 +247,7 @@ function AppContent() {
     (dmChannelId) => {
       if (!socket) return;
       setActiveDM(dmChannelId);
+      setMobileTab('chat');
       // Fetch latest messages
       socket.emit('dm:join', { dmChannelId }, (response) => {
         if (response?.success) {
@@ -292,9 +300,13 @@ function AppContent() {
 
   const voiceState = useVoice(voiceChannel);
 
+  // Auto-reset: if voice disconnects while on voice tab, switch to chat
+  const effectiveMobileTab = (!voiceChannel && mobileTab === 'voice') ? 'chat' : mobileTab;
+
   const handleVoiceJoin = useCallback(
     (channelId) => {
       setVoiceChannel(channelId);
+      setMobileTab('voice');
     },
     []
   );
@@ -321,33 +333,43 @@ function AppContent() {
   // Find DM target username for header
   const activeDMInfo = activeDM ? dmChannels.find((d) => d.id === activeDM) : null;
 
+  const memberListProps = {
+    user,
+    userStatus,
+    onStatusChange: handleStatusChange,
+    onLogout: handleLogout,
+    voiceState,
+    voiceChannel,
+  };
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
-      <Sidebar
-        channels={channels}
-        activeChannel={activeDM ? null : activeChannel}
-        voiceChannel={voiceChannel}
-        voiceMembers={voiceMembers}
-        onChannelSelect={handleChannelSelect}
-        onVoiceJoin={handleVoiceJoin}
-        onVoiceLeave={handleVoiceLeave}
-        user={user}
-        voiceState={voiceState}
-        voiceChannelName={voiceChannelInfo?.name}
-        onLogout={handleLogout}
-        userStatus={userStatus}
-        onStatusChange={handleStatusChange}
-        dmChannels={dmChannels}
-        activeDM={activeDM}
-        onDMSelect={handleDMSelect}
-      />
-      <main className="flex-1 flex flex-col bg-discord-chat min-w-0">
+      {/* Sidebar — desktop: fixed 240px column, mobile: full-screen when channels tab */}
+      <div className={`max-sm:fixed max-sm:inset-0 max-sm:z-40 sm:w-60 sm:flex-shrink-0 ${effectiveMobileTab === 'channels' ? 'max-sm:block' : 'max-sm:hidden'}`}>
+        <Sidebar
+          channels={channels}
+          activeChannel={activeDM ? null : activeChannel}
+          voiceChannel={voiceChannel}
+          voiceMembers={voiceMembers}
+          onChannelSelect={handleChannelSelect}
+          onVoiceJoin={handleVoiceJoin}
+          onVoiceLeave={handleVoiceLeave}
+          user={user}
+          voiceState={voiceState}
+          voiceChannelName={voiceChannelInfo?.name}
+          dmChannels={dmChannels}
+          activeDM={activeDM}
+          onDMSelect={handleDMSelect}
+        />
+      </div>
+
+      {/* Main chat — desktop: flex column, mobile: full-screen when chat tab */}
+      <main className={`flex-1 flex flex-col bg-discord-chat min-w-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 ${effectiveMobileTab === 'chat' ? 'max-sm:block' : 'max-sm:hidden'}`}>
         {activeDM && activeDMInfo ? (
           <TextChannel
             channel={{ id: activeDM, name: activeDMInfo.username }}
             messages={messages.get(activeDM) || []}
             onSendMessage={handleSendDM}
-            user={user}
             isDM
             dmTarget={activeDMInfo.username}
           />
@@ -357,15 +379,51 @@ function AppContent() {
               channel={currentChannel}
               messages={messages.get(activeChannel) || []}
               onSendMessage={handleSendMessage}
-              user={user}
             />
           )
         )}
       </main>
-      <MemberList
-        users={onlineUsers}
-        currentUser={user.username}
-        onOpenDM={handleOpenDM}
+
+      {/* Mobile voice view — only when voice tab active */}
+      {voiceChannel && (
+        <div className={`fixed inset-0 z-30 sm:hidden ${effectiveMobileTab === 'voice' ? 'block' : 'hidden'}`}>
+          <MobileVoiceView
+            voiceChannel={voiceChannel}
+            voiceChannelName={voiceChannelInfo?.name}
+            voiceMembers={voiceMembers}
+            voiceState={voiceState}
+            user={user}
+          />
+        </div>
+      )}
+
+      {/* Mobile profile view — only when me tab active */}
+      <div className={`fixed inset-0 z-30 sm:hidden ${effectiveMobileTab === 'me' ? 'block' : 'hidden'}`}>
+        <MobileProfileView
+          user={user}
+          userStatus={userStatus}
+          onStatusChange={handleStatusChange}
+          onLogout={handleLogout}
+          voiceState={voiceState}
+          voiceChannel={voiceChannel}
+        />
+      </div>
+
+      {/* MemberList — desktop: side column (hidden <lg), mobile: full-screen when members tab */}
+      <div className={`flex-shrink-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 sm:hidden lg:block ${effectiveMobileTab === 'members' ? 'max-sm:block' : 'max-sm:hidden'}`}>
+        <MemberList
+          users={onlineUsers}
+          currentUser={user.username}
+          onOpenDM={handleOpenDM}
+          {...memberListProps}
+        />
+      </div>
+
+      {/* Mobile tab bar */}
+      <MobileTabBar
+        activeTab={effectiveMobileTab}
+        onTabChange={setMobileTab}
+        hasVoice={!!voiceChannel}
       />
     </div>
   );

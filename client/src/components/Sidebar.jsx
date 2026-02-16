@@ -1,35 +1,34 @@
-import { useState, useRef, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 
-const STATUS_CONFIG = {
-  online: { label: 'Online', color: 'bg-discord-green', textColor: 'text-discord-green' },
-  away: { label: 'Away', color: 'bg-discord-yellow', textColor: 'text-discord-yellow' },
-  busy: { label: 'Do Not Disturb', color: 'bg-discord-red', textColor: 'text-discord-red' },
-  invisible: { label: 'Invisible', color: 'bg-discord-muted/60', textColor: 'text-discord-muted' },
-  offline: { label: 'Offline', color: 'bg-discord-muted/60', textColor: 'text-discord-muted' },
-};
-
-function StatusDot({ status, className = '' }) {
-  const config = STATUS_CONFIG[status] || STATUS_CONFIG.online;
-  if (status === 'busy') {
-    return (
-      <div className={`${config.color} rounded-full flex items-center justify-center ${className}`}>
-        <div className="w-1.5 h-0.5 bg-discord-dark rounded-full" />
-      </div>
-    );
+// Frequency bar color gradient: green → cyan → magenta
+const BAR_COUNT = 32;
+const BAR_COLORS = Array.from({ length: BAR_COUNT }, (_, i) => {
+  const t = i / (BAR_COUNT - 1);
+  // green(35,165,90) → cyan(0,229,255) → magenta(255,0,234)
+  let r, g, b;
+  if (t < 0.5) {
+    const p = t * 2;
+    r = Math.round(35 * (1 - p));
+    g = Math.round(165 + (229 - 165) * p);
+    b = Math.round(90 + (255 - 90) * p);
+  } else {
+    const p = (t - 0.5) * 2;
+    r = Math.round(0 + 255 * p);
+    g = Math.round(229 * (1 - p));
+    b = Math.round(255 + (234 - 255) * p);
   }
-  if (status === 'away') {
-    return (
-      <div className={`${config.color} rounded-full relative ${className}`}>
-        <div className="absolute top-0.5 left-0.5 w-1.5 h-1.5 bg-discord-dark rounded-full" />
-      </div>
-    );
-  }
-  return <div className={`${config.color} rounded-full ${className}`} />;
-}
+  return `${r},${g},${b}`;
+});
 
-function JukeboxCard({ sharingUser, isSharing, musicVolume, setMusicVolume, shareVolume, setShareVolume }) {
+function JukeboxCard({ sharingUser, isSharing, musicVolume, setMusicVolume, shareVolume, setShareVolume, musicAnalyserRef }) {
   const containerRef = useRef(null);
   const titleRef = useRef(null);
+  const canvasRef = useRef(null);
+  const cardRef = useRef(null);
+  const animFrameRef = useRef(null);
+  const barsRef = useRef(new Float32Array(BAR_COUNT));
+  const dataRef = useRef(new Uint8Array(64));
+  const ctxRef = useRef(null);
 
   const title = sharingUser.title || 'Sharing Audio';
 
@@ -48,14 +47,155 @@ function JukeboxCard({ sharingUser, isSharing, musicVolume, setMusicVolume, shar
     }
   });
 
+  // rAF visualizer loop
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const logicalW = 200;
+    const logicalH = 36;
+    canvas.width = logicalW * dpr;
+    canvas.height = logicalH * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctxRef.current = ctx;
+
+    const bars = barsRef.current;
+    const data = dataRef.current;
+    let frameCount = 0;
+    let running = true;
+
+    function draw() {
+      if (!running) return;
+      animFrameRef.current = requestAnimationFrame(draw);
+
+      const analyser = musicAnalyserRef?.current;
+      ctx.clearRect(0, 0, logicalW, logicalH);
+
+      // Read frequency data if analyser is available
+      if (analyser) {
+        try {
+          analyser.getByteFrequencyData(data);
+        } catch {
+          // analyser may be from a closed context
+        }
+      }
+
+      // Update bars: average pairs of FFT bins into 32 bars
+      const barW = 4.5;
+      const gap = 1.75;
+      const maxH = 22;
+      const mirrorH = 8;
+      const baseY = maxH; // bars grow upward from this line
+      const totalW = BAR_COUNT * (barW + gap) - gap;
+      const offsetX = (logicalW - totalW) / 2;
+
+      let energySum = 0;
+      for (let i = 0; i < BAR_COUNT; i++) {
+        // Average 2 FFT bins per bar (fftSize=128 → 64 bins)
+        const raw = ((data[i * 2] || 0) + (data[i * 2 + 1] || 0)) / 2 / 255;
+        // Attack/decay smoothing
+        if (raw > bars[i]) {
+          bars[i] = raw; // instant attack
+        } else {
+          bars[i] *= 0.92; // exponential decay
+        }
+        energySum += bars[i];
+      }
+
+      // Draw bars + mirror
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < BAR_COUNT; i++) {
+        const h = bars[i] * maxH;
+        if (h < 0.5) continue;
+        const x = offsetX + i * (barW + gap);
+        const color = BAR_COLORS[i];
+        const alpha = 0.4 + bars[i] * 0.6;
+
+        // Main bar with rounded top
+        ctx.fillStyle = `rgba(${color},${alpha})`;
+        ctx.beginPath();
+        const radius = Math.min(2, h / 2);
+        ctx.moveTo(x, baseY);
+        ctx.lineTo(x, baseY - h + radius);
+        ctx.quadraticCurveTo(x, baseY - h, x + radius, baseY - h);
+        ctx.lineTo(x + barW - radius, baseY - h);
+        ctx.quadraticCurveTo(x + barW, baseY - h, x + barW, baseY - h + radius);
+        ctx.lineTo(x + barW, baseY);
+        ctx.fill();
+
+        // Glow shadow on bright bars
+        if (bars[i] > 0.3) {
+          ctx.shadowColor = `rgba(${color},${bars[i] * 0.5})`;
+          ctx.shadowBlur = 4;
+          ctx.fillRect(x, baseY - h, barW, h);
+          ctx.shadowBlur = 0;
+          ctx.shadowColor = 'transparent';
+        }
+
+        // Mirror reflection
+        const mirrorMax = Math.min(h * 0.5, mirrorH);
+        if (mirrorMax > 0.5) {
+          const grad = ctx.createLinearGradient(0, baseY + 1, 0, baseY + 1 + mirrorMax);
+          grad.addColorStop(0, `rgba(${color},${alpha * 0.3})`);
+          grad.addColorStop(1, `rgba(${color},0)`);
+          ctx.fillStyle = grad;
+          ctx.fillRect(x, baseY + 1, barW, mirrorMax);
+        }
+      }
+      ctx.restore();
+
+      // Update card glow every 6 frames (~100ms at 60fps)
+      if (++frameCount % 6 === 0 && cardRef.current) {
+        const avgEnergy = energySum / BAR_COUNT;
+        if (avgEnergy > 0.01) {
+          const glowAlpha = Math.min(0.5, avgEnergy * 0.6);
+          const glowSpread = Math.round(4 + avgEnergy * 8);
+          cardRef.current.style.boxShadow = `0 0 ${glowSpread}px rgba(35,165,90,${glowAlpha})`;
+          cardRef.current.style.borderColor = `rgba(35,165,90,${0.2 + avgEnergy * 0.3})`;
+        } else {
+          cardRef.current.style.boxShadow = '';
+          cardRef.current.style.borderColor = '';
+        }
+      }
+    }
+
+    animFrameRef.current = requestAnimationFrame(draw);
+    const card = cardRef.current;
+
+    return () => {
+      running = false;
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (card) {
+        card.style.boxShadow = '';
+        card.style.borderColor = '';
+      }
+    };
+  }, [musicAnalyserRef]);
+
   return (
-    <div className="mx-1 mb-1.5 rounded-lg bg-discord-green/10 border border-discord-green/20 overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center gap-1.5 px-2.5 pt-2 pb-1">
-        <svg className="w-3.5 h-3.5 text-discord-green flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+    <div ref={cardRef} className="mx-0.5 mb-1 rounded-lg bg-discord-green/10 border border-discord-green/20 overflow-hidden" style={{ transition: 'box-shadow 150ms ease-out, border-color 150ms ease-out' }}>
+      {/* Header + shared by merged */}
+      <div className="flex items-center gap-1.5 px-2.5 pt-1.5 pb-0.5">
+        <svg className="w-3 h-3 text-discord-green flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
           <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
         </svg>
         <span className="text-[10px] font-bold text-discord-green uppercase tracking-wider">Now Playing</span>
+        <span className="ml-auto text-[10px] text-discord-green/60 truncate">
+          {isSharing ? 'You' : sharingUser.username}
+        </span>
+      </div>
+      {/* Frequency visualizer */}
+      <div className="px-1.5">
+        <canvas
+          ref={canvasRef}
+          className="jukebox-canvas w-full"
+          width={200}
+          height={36}
+          style={{ height: '36px' }}
+        />
       </div>
       {/* Scrolling title */}
       <div ref={containerRef} className="px-2.5 overflow-hidden jukebox-title-mask">
@@ -66,20 +206,11 @@ function JukeboxCard({ sharingUser, isSharing, musicVolume, setMusicVolume, shar
           {title}
         </div>
       </div>
-      {/* Shared by */}
-      <div className="px-2.5 mt-0.5">
-        <span className="text-[11px] text-discord-green/70">
-          {isSharing ? 'You are sharing' : `Shared by ${sharingUser.username}`}
-        </span>
-      </div>
-      {/* Volume slider */}
-      <div className="px-2.5 pt-1.5 pb-2">
-        <div className="flex items-center justify-between mb-1">
-          <label className="text-[10px] text-discord-muted font-medium">Volume</label>
-          <span className="text-[10px] text-discord-muted tabular-nums">
-            {isSharing ? (shareVolume ?? 100) : (musicVolume ?? 80)}%
-          </span>
-        </div>
+      {/* Inline volume slider */}
+      <div className="flex items-center gap-1.5 px-2.5 pt-1 pb-1.5">
+        <svg className="w-3 h-3 text-discord-muted flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8.5v7a4.47 4.47 0 0 0 2.5-3.5z" />
+        </svg>
         <input
           type="range"
           min="0"
@@ -90,8 +221,11 @@ function JukeboxCard({ sharingUser, isSharing, musicVolume, setMusicVolume, shar
             if (isSharing) setShareVolume?.(v);
             else setMusicVolume?.(v);
           }}
-          className="voice-slider w-full"
+          className="voice-slider flex-1"
         />
+        <span className="text-[10px] text-discord-muted tabular-nums w-7 text-right">
+          {isSharing ? (shareVolume ?? 100) : (musicVolume ?? 80)}%
+        </span>
       </div>
     </div>
   );
@@ -108,9 +242,6 @@ export default function Sidebar({
   user,
   voiceState,
   voiceChannelName,
-  onLogout,
-  userStatus,
-  onStatusChange,
   dmChannels,
   activeDM,
   onDMSelect,
@@ -119,36 +250,13 @@ export default function Sidebar({
   const voiceChannels = channels.filter((c) => c.type === 'voice');
 
   const {
-    isMuted, isSpeaking, speakingPeers, toggleMute, micLevel, sensitivity, setSensitivity,
-    sensitivityMode, setSensitivityMode,
+    isMuted, isSpeaking, speakingPeers, toggleMute,
     isSharing, sharingUser, startSharing, stopSharing, sharingSupported, musicVolume, setMusicVolume,
-    shareVolume, setShareVolume, noiseSuppression, setNoiseSuppression,
+    shareVolume, setShareVolume, musicAnalyserRef,
   } = voiceState || {};
 
-  const [showSettings, setShowSettings] = useState(false);
-  const [showStatusPicker, setShowStatusPicker] = useState(false);
-  const settingsRef = useRef(null);
-  const statusRef = useRef(null);
-
-  // Close settings popover on click outside
-  useEffect(() => {
-    if (!showSettings && !showStatusPicker) return;
-    function handleClick(e) {
-      if (showSettings && settingsRef.current && !settingsRef.current.contains(e.target)) {
-        setShowSettings(false);
-      }
-      if (showStatusPicker && statusRef.current && !statusRef.current.contains(e.target)) {
-        setShowStatusPicker(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [showSettings, showStatusPicker]);
-
-  const statusConfig = STATUS_CONFIG[userStatus] || STATUS_CONFIG.online;
-
   return (
-    <div className="w-60 bg-discord-darker flex flex-col h-full flex-shrink-0">
+    <div className="bg-discord-darker flex flex-col h-full flex-shrink-0 pb-14 sm:pb-0">
       {/* Server header */}
       <div className="h-12 px-4 flex items-center border-b border-black/40 hover:bg-discord-hover transition-colors cursor-pointer">
         <h2 className="font-bold text-white truncate tracking-tight">Disclone</h2>
@@ -290,15 +398,14 @@ export default function Sidebar({
 
       {/* Voice connection panel — shown when in a voice channel */}
       {voiceChannel && (
-        <div className="px-2 py-2 bg-discord-dark/60 border-t border-black/30">
-          <div className="flex items-center gap-2 px-1.5 mb-2">
-            <svg className="w-4 h-4 text-discord-green flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+        <div className="px-2 py-1.5 bg-discord-dark/60 border-t border-black/30">
+          <div className="flex items-center gap-1.5 px-1.5 mb-1.5">
+            <svg className="w-3.5 h-3.5 text-discord-green flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 3a1 1 0 0 0-1.707-.707L5.586 7H4a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h1.586l4.707 4.707A1 1 0 0 0 12 21V3z" />
             </svg>
-            <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-semibold text-discord-green leading-tight">Voice Connected</div>
-              <div className="text-[11px] text-discord-muted truncate leading-tight mt-0.5">{voiceChannelName || 'Voice Chat'}</div>
-            </div>
+            <span className="text-[11px] font-semibold text-discord-green truncate">
+              Voice Connected / {voiceChannelName || 'Voice Chat'}
+            </span>
           </div>
           {/* Jukebox card — shown when someone is sharing audio */}
           {sharingUser && <JukeboxCard
@@ -308,6 +415,7 @@ export default function Sidebar({
             setMusicVolume={setMusicVolume}
             shareVolume={shareVolume}
             setShareVolume={setShareVolume}
+            musicAnalyserRef={musicAnalyserRef}
           />}
           <div className="flex items-center gap-1 px-1">
             <button
@@ -358,181 +466,8 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* User bar */}
-      <div className="relative px-2 py-2 bg-discord-dark/80 border-t border-black/40" ref={settingsRef}>
-        {/* Settings popover */}
-        {showSettings && (
-          <div className="absolute bottom-full left-2 right-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 p-3 z-50">
-            <div className="text-[11px] font-bold text-discord-muted uppercase tracking-wide mb-3">
-              Voice Settings
-            </div>
-
-            <div className="mb-1">
-              <div className="flex items-center justify-between mb-1.5">
-                <div>
-                  <div className="text-[12px] text-discord-text">Input Sensitivity</div>
-                  <div className="text-[10px] text-discord-muted/60 mt-0.5">
-                    {(sensitivityMode ?? 'auto') === 'auto' ? 'Automatically determined' : 'Manual threshold'}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setSensitivityMode?.((sensitivityMode ?? 'auto') === 'auto' ? 'manual' : 'auto')}
-                  className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-                    (sensitivityMode ?? 'auto') === 'auto' ? 'bg-discord-green' : 'bg-discord-muted/30'
-                  }`}
-                  title={(sensitivityMode ?? 'auto') === 'auto' ? 'Switch to manual' : 'Switch to auto'}
-                >
-                  <div
-                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-                      (sensitivityMode ?? 'auto') === 'auto' ? 'translate-x-4' : 'translate-x-0.5'
-                    }`}
-                  />
-                </button>
-              </div>
-              {(sensitivityMode ?? 'auto') === 'manual' && (
-                <div className="mt-2">
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-[11px] text-discord-muted">Threshold</label>
-                    <span className="text-[11px] text-discord-muted tabular-nums">{sensitivity ?? 50}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={sensitivity ?? 50}
-                    onChange={(e) => setSensitivity?.(Number(e.target.value))}
-                    className="voice-slider w-full"
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* Noise suppression toggle */}
-            <div className="mt-3 pt-3 border-t border-white/5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-[12px] text-discord-text">Noise Suppression</div>
-                  <div className="text-[10px] text-discord-muted/60 mt-0.5">AI-powered background noise removal</div>
-                </div>
-                <button
-                  onClick={() => setNoiseSuppression?.(!noiseSuppression)}
-                  className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-                    noiseSuppression ? 'bg-discord-green' : 'bg-discord-muted/30'
-                  }`}
-                >
-                  <div
-                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-                      noiseSuppression ? 'translate-x-4' : 'translate-x-0.5'
-                    }`}
-                  />
-                </button>
-              </div>
-            </div>
-
-            {/* Mic level indicator — only shown when in voice */}
-            {voiceChannel && (
-              <div className="mt-2.5">
-                <div className="text-[11px] text-discord-muted mb-1">Mic Level</div>
-                <div className="h-2 bg-discord-darker rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-75 ${
-                      isSpeaking ? 'bg-discord-green' : 'bg-discord-muted/40'
-                    }`}
-                    style={{ width: `${micLevel || 0}%` }}
-                  />
-                </div>
-                <div className="flex justify-between mt-1">
-                  <span className="text-[10px] text-discord-muted/60">Quiet</span>
-                  <span className={`text-[10px] ${isSpeaking ? 'text-discord-green' : 'text-discord-muted/60'}`}>
-                    {isSpeaking ? 'Transmitting' : 'Gate closed'}
-                  </span>
-                </div>
-              </div>
-            )}
-
-          </div>
-        )}
-
-        {/* Status picker dropdown */}
-        {showStatusPicker && (
-          <div ref={statusRef} className="absolute bottom-full left-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 z-50 w-48">
-            {Object.entries(STATUS_CONFIG).map(([key, config]) => (
-              <button
-                key={key}
-                onClick={() => {
-                  onStatusChange?.(key);
-                  setShowStatusPicker(false);
-                }}
-                className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-discord-hover ${
-                  userStatus === key ? 'text-white' : 'text-discord-text'
-                }`}
-              >
-                <StatusDot status={key} className="w-3 h-3" />
-                <span className="text-[13px] font-medium">{config.label}</span>
-                {userStatus === key && (
-                  <svg className="w-3.5 h-3.5 ml-auto text-discord-accent" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                  </svg>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div className="flex items-center gap-2.5 px-1.5 py-1 rounded hover:bg-discord-hover/50 transition-colors">
-          <div
-            className="relative flex-shrink-0 cursor-pointer"
-            onClick={() => setShowStatusPicker((s) => !s)}
-            title="Change status"
-          >
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold"
-              style={{ backgroundColor: user.avatarColor }}
-            >
-              {user.username[0].toUpperCase()}
-            </div>
-            <div className="absolute -bottom-0.5 -right-0.5 border-2 border-discord-dark rounded-full">
-              <StatusDot status={userStatus || 'online'} className="w-3 h-3" />
-            </div>
-          </div>
-          <div
-            className="flex-1 min-w-0 cursor-pointer"
-            onClick={() => setShowStatusPicker((s) => !s)}
-            title="Change status"
-          >
-            <div className="text-[13px] font-semibold text-white truncate leading-tight">
-              {user.username}
-            </div>
-            <div className={`text-[11px] ${statusConfig.textColor} leading-tight mt-0.5`}>
-              {statusConfig.label}
-            </div>
-          </div>
-          <button
-            onClick={onLogout}
-            className="p-1.5 rounded transition-colors flex-shrink-0 text-discord-muted hover:text-discord-red hover:bg-discord-red/10"
-            title="Log Out"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M10.09 15.59L11.5 17l5-5-5-5-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59zM19 3H5c-1.11 0-2 .9-2 2v4h2V5h14v14H5v-4H3v4c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
-            </svg>
-          </button>
-          <button
-            onClick={() => setShowSettings((s) => !s)}
-            className={`p-1.5 rounded transition-colors flex-shrink-0 ${
-              showSettings
-                ? 'text-white bg-discord-active'
-                : 'text-discord-muted hover:text-discord-text hover:bg-discord-hover'
-            }`}
-            title="Voice Settings"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" />
-            </svg>
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
 
-export { StatusDot };
+export { JukeboxCard };

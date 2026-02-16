@@ -193,8 +193,8 @@ export default function TextChannel({ channel, messages, onSendMessage, isDM, dm
       <div className="h-12 px-4 flex items-center shadow-[0_1px_0_rgba(0,0,0,0.2),0_1px_2px_rgba(0,0,0,0.1)] border-b border-black/30 flex-shrink-0 z-10 gap-2">
         <span className="text-discord-muted text-lg font-light">{headerIcon}</span>
         <span className="font-bold text-white text-[15px]">{headerName}</span>
-        <div className="mx-2 w-px h-5 bg-discord-muted/20" />
-        <span className="text-[13px] text-discord-muted truncate">{headerDesc}</span>
+        <div className="mx-2 w-px h-5 bg-discord-muted/20 hidden sm:block" />
+        <span className="text-[13px] text-discord-muted truncate hidden sm:block">{headerDesc}</span>
       </div>
 
       {/* Messages */}
@@ -297,7 +297,7 @@ export default function TextChannel({ channel, messages, onSendMessage, isDM, dm
       )}
 
       {/* Input */}
-      <form onSubmit={handleSubmit} className={`px-4 pb-6 ${pendingImages.length > 0 ? 'pt-0' : 'pt-1'} flex-shrink-0`}>
+      <form onSubmit={handleSubmit} className={`px-4 pb-6 max-sm:pb-20 ${pendingImages.length > 0 ? 'pt-0' : 'pt-1'} flex-shrink-0`}>
         <div className={`bg-discord-input flex items-center px-4 border border-transparent focus-within:border-discord-border/50 transition-colors ${pendingImages.length > 0 ? 'rounded-b-lg border-t border-white/10' : 'rounded-lg'}`}>
           <button
             type="button"

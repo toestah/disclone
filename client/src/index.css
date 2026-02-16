@@ -49,6 +49,10 @@ body {
 .jukebox-title-scroll {
   animation: marquee-scroll 8s ease-in-out infinite alternate;
 }
+.jukebox-canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
 .jukebox-title-mask {
   mask-image: linear-gradient(to right, transparent, black 8px, black calc(100% - 8px), transparent);
   -webkit-mask-image: linear-gradient(to right, transparent, black 8px, black calc(100% - 8px), transparent);
@@ -107,6 +111,11 @@ body {
   border: none;
   cursor: pointer;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Safe area padding for notched devices */
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* Selection */
