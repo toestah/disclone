@@ -26,7 +26,10 @@ npm --prefix client run lint
 # Docker build (multi-arch for Cloudron deployment)
 docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/toestah/disclone:<tag> --push .
 
-# Deploy to Cloudron
+# Deploy to Cloudron (fresh install)
+cloudron install --location disclone.datapulsecorp.com --image ghcr.io/toestah/disclone:<tag>
+
+# Deploy to Cloudron (update existing)
 cloudron update --app disclone.datapulsecorp.com --image ghcr.io/toestah/disclone:<tag>
 ```
 
@@ -42,12 +45,13 @@ Express serves the built client static files in production. Socket.IO handles al
 - `activeSessions` — socketId → {username, avatarColor, currentChannel}
 - `messageHistory` — channelId → Message[] (capped at 500; returns last 100 on join)
 - `voiceRooms` — channelId → Set\<socketId\>
-- `clientCapabilities` — socketId → {opus: boolean}
 - `speakingState` / `mutedState` — socketId → boolean
 
 Channels are hardcoded: 2 text (`general`, `random`), 2 voice (`voice-chat-1`, `voice-chat-2`).
 
-Audio relay: server receives `audio:chunk` events and broadcasts to the voice room via `socket.to().volatile.emit()` (lossy/real-time). It relays `codec`, `seq`, and `sampleRate` fields to support both Opus and PCM.
+**REST endpoint**: `GET /api/ice-servers` returns STUN servers + optional TURN (configured via `TURN_URLS`, `TURN_USERNAME`, `TURN_CREDENTIAL` env vars).
+
+**WebRTC signaling**: Socket.IO relays `webrtc:offer`, `webrtc:answer`, and `webrtc:ice-candidate` events between peers with room membership validation. No audio data passes through the server.
 
 ### Client
 
@@ -57,21 +61,25 @@ Audio relay: server receives `audio:chunk` events and broadcasts to the voice ro
 
 **Components**: `LoginScreen`, `Sidebar`, `TextChannel`, `VoiceChannel` (unused), `MemberList`, `UserAvatar` (shared avatar with speaking glow + muted badge).
 
-### Voice System (`hooks/useVoice.js` + AudioWorklets)
+### Voice System (`hooks/useVoice.js` — WebRTC P2P mesh)
 
-This is the most complex part of the codebase. The voice pipeline:
+This is the most complex part of the codebase. Voice uses WebRTC peer connections for direct UDP audio between clients. Socket.IO is only used for signaling (offer/answer/ICE candidate exchange).
 
-**Capture chain**: mic → HighPass(80Hz) → LowPass(12kHz) → DynamicsCompressor → CaptureWorklet (pass-through) → AnalyserNode → silentGain → destination
+**Local audio chain**: `getUserMedia (echoCancellation, noiseSuppression, autoGainControl)` → `AudioContext (48kHz)` → `HighPass (80Hz)` → `Presence EQ (2.5kHz)` → `DenoiseWorklet (RNNoise)` → `AnalyserNode` → `GainNode (always 1)` → `MediaStreamDestination` → `addTrack()` to each RTCPeerConnection.
 
-**CaptureWorklet** (`public/capture-processor.js`): Runs on audio thread. Accumulates 128-sample render quanta into 20ms frames, posts to main thread. Silence gate at peak < 0.0001.
+**DenoiseWorklet** (`public/denoise-processor.js`): Accumulates 128-sample render quanta into 480-sample (10ms) frames, posts to main thread for RNNoise WASM processing, receives denoised audio back via FIFO. Has bypass mode (passthrough) when noise suppression is disabled.
 
-**Main thread processing**: Receives frames from worklet → VAD gate (spectral analysis, 300ms hold, configurable sensitivity) → smooth fade-in/fade-out on gate transitions → encode via WebCodecs Opus (32kbps) or fall back to Int16 PCM.
+**Remote audio chain** (per peer): `PC.ontrack` → `MediaStreamSource` → `AnalyserNode (speaking detection)` → `StereoPannerNode (spatial)` → `masterCompressor` → `destination`.
 
-**Codec negotiation**: Clients announce `{opus: boolean}` capability on `voice:join`. Sender dynamically chooses Opus (if all peers support it) or PCM. Safety guard: never interpret Opus bytes as PCM.
+**VAD**: AnalyserNode polled every 50ms for speaking indicator UI only. RNNoise provides vadProb when noise suppression enabled, otherwise RMS dB threshold. VAD does NOT gate audio — RNNoise denoises the signal and Opus DTX handles silence efficiently.
 
-**PlaybackWorklet** (`public/playback-processor.js`): Per-peer ring buffers (2s each), 100ms prefill before playback starts, 5ms fade-in, 3ms exponential decay on underrun, soft clipping for multi-peer mixing.
+**Signaling flow**: Existing peers create offers to new joiners (avoids glare). Client registers signaling listeners BEFORE emitting `voice:join` so no offers are missed.
 
-**Receive path**: Opus → AudioDecoder → resample if needed → postMessage to PlaybackWorklet. PCM → Int16→Float32 → resample → PlaybackWorklet.
+**SDP munging**: After createOffer/createAnswer, Opus params are set: `maxaveragebitrate=64000`, `useinbandfec=1`, `usedtx=1`.
+
+**ICE**: Fetches config from `/api/ice-servers` at init. STUN-only by default (Google STUN servers). TURN available via server env vars.
+
+**Music sharing**: Uses Socket.IO relay (separate from voice). Music capture/playback worklets (`music-capture-processor.js`, `music-playback-processor.js`) unchanged.
 
 ### Socket.IO Hook (`hooks/useSocket.jsx`)
 
@@ -83,8 +91,8 @@ Context-based singleton. Uses `.jsx` extension (required — esbuild loader need
 - **JSX files**: Must use `.jsx` extension when containing JSX (Vite/esbuild requirement).
 - **ES Modules**: Both server and client use ESM (`"type": "module"` in package.json).
 - **AudioWorklets**: Located in `client/public/` (served as static files, not bundled by Vite). They run on the audio thread and communicate with main thread via `port.postMessage`.
-- **Volatile emit**: Audio chunks use `socket.volatile.emit()` — OK to drop under congestion.
 - **Vite config**: `define: { global: 'globalThis' }` polyfills Node globals for socket.io-client in browser.
 - **ESLint**: Flat config (v9 style) in `client/eslint.config.js`. `no-unused-vars` ignores vars matching `^[A-Z_]`.
 - **Dev HTTPS**: `certs/` directory has self-signed SSL for local HTTPS testing (gitignored).
 - **Production**: Docker image runs `node server/index.js` on port 3000. Server serves built client from `client/dist/` with aggressive caching for hashed assets and no-cache for HTML. SPA fallback (`app.get('*')`) serves `index.html`.
+- **Cloudron**: Deployed at `disclone.datapulsecorp.com`. Manifest in `CloudronManifest.json` (httpPort 3000, no port bindings). GHCR package: `ghcr.io/toestah/disclone`.
