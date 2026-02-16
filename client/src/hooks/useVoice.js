@@ -252,6 +252,8 @@ export default function useVoice(channelId) {
   useEffect(() => {
     if (!channelId || !socket) return;
     let cancelled = false;
+    let audioReady = false; // true once processedTrack + masterCompressor exist
+    const pendingSignals = []; // queued signaling messages before audio is ready
 
     // Capture ref values for cleanup (avoids react-hooks/exhaustive-deps warnings)
     const peerConnections = peerConnectionsRef.current;
@@ -276,9 +278,12 @@ export default function useVoice(channelId) {
     function handleUserJoined({ socketId }) {
       console.log(`[Voice] → user-joined: ${socketId}`);
       playChime(playbackCtxRef, 'up');
-      // Existing peer creates offer to new joiner
-      if (processedTrackRef.current) {
+      // Existing peer creates offer to new joiner (only if our audio is ready)
+      if (audioReady && processedTrackRef.current) {
         createPeerConnection(socketId, true);
+      } else {
+        console.log(`[Voice] Queuing user-joined for ${socketId} (audio not ready)`);
+        pendingSignals.push({ type: 'user-joined', msg: { socketId } });
       }
     }
 
@@ -303,13 +308,24 @@ export default function useVoice(channelId) {
     }
 
     // ── WebRTC signaling handlers ──
+    // Offers/answers/ICE candidates may arrive before getUserMedia completes
+    // and the processed track exists. Queue them and flush after init finishes.
 
-    function handleOffer({ from, offer }) {
-      console.log(`[Voice] ← webrtc:offer from ${from}`);
-      handleRemoteOffer(from, offer);
+    function handleOffer(msg) {
+      if (!audioReady) {
+        console.log(`[Voice] ← webrtc:offer from ${msg.from} (queued — audio not ready)`);
+        pendingSignals.push({ type: 'offer', msg });
+        return;
+      }
+      console.log(`[Voice] ← webrtc:offer from ${msg.from}`);
+      handleRemoteOffer(msg.from, msg.offer);
     }
 
     function handleAnswer({ from, answer }) {
+      if (!audioReady) {
+        pendingSignals.push({ type: 'answer', msg: { from, answer } });
+        return;
+      }
       console.log(`[Voice] ← webrtc:answer from ${from}`);
       const pc = peerConnectionsRef.current.get(from);
       if (!pc) return;
@@ -319,10 +335,27 @@ export default function useVoice(channelId) {
     }
 
     function handleIceCandidate({ from, candidate }) {
+      if (!audioReady) {
+        pendingSignals.push({ type: 'ice', msg: { from, candidate } });
+        return;
+      }
       const pc = peerConnectionsRef.current.get(from);
       if (!pc) return;
       if (candidate) {
         pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      }
+    }
+
+    function flushPendingSignals() {
+      if (pendingSignals.length === 0) return;
+      console.log(`[Voice] Flushing ${pendingSignals.length} queued signaling message(s)`);
+      const queued = [...pendingSignals];
+      pendingSignals.length = 0;
+      for (const { type, msg } of queued) {
+        if (type === 'offer') handleOffer(msg);
+        else if (type === 'answer') handleAnswer(msg);
+        else if (type === 'ice') handleIceCandidate(msg);
+        else if (type === 'user-joined') handleUserJoined(msg);
       }
     }
 
@@ -408,6 +441,13 @@ export default function useVoice(channelId) {
       const playCtx = playbackCtxRef.current;
       if (!playCtx || playCtx.state === 'closed') return;
 
+      // Chrome requires a hidden <audio> element to activate the media pipeline
+      // for remote WebRTC streams. Without this, MediaStreamSource produces silence.
+      const audioEl = document.createElement('audio');
+      audioEl.srcObject = stream;
+      audioEl.volume = 0; // mute element — we route through Web Audio instead
+      audioEl.play().catch(() => { /* ignore autoplay block */ });
+
       const source = playCtx.createMediaStreamSource(stream);
       const analyser = playCtx.createAnalyser();
       analyser.fftSize = 256;
@@ -426,7 +466,7 @@ export default function useVoice(channelId) {
         panner.connect(playCtx.destination);
       }
 
-      remoteAudioNodesRef.current.set(peerId, { source, analyser, panner, stream });
+      remoteAudioNodesRef.current.set(peerId, { source, analyser, panner, stream, audioEl });
     }
 
     function cleanupRemoteAudio(peerId) {
@@ -435,6 +475,10 @@ export default function useVoice(channelId) {
       try { nodes.source.disconnect(); } catch { /* ignore */ }
       try { nodes.analyser.disconnect(); } catch { /* ignore */ }
       try { nodes.panner.disconnect(); } catch { /* ignore */ }
+      if (nodes.audioEl) {
+        nodes.audioEl.pause();
+        nodes.audioEl.srcObject = null;
+      }
       remoteAudioNodesRef.current.delete(peerId);
     }
 
@@ -686,6 +730,10 @@ export default function useVoice(channelId) {
         presence.connect(analyser);
         analyser.connect(vadGain);
         vadGain.connect(dest);
+
+        // Audio chain + masterCompressor are ready — flush any queued signaling
+        audioReady = true;
+        flushPendingSignals();
 
         // ── Eagerly load RNNoise if previously enabled ──
         if (noiseSuppressionRef.current && !rnnoiseRef.current) {
@@ -957,6 +1005,10 @@ export default function useVoice(channelId) {
         try { nodes.source.disconnect(); } catch { /* ignore */ }
         try { nodes.analyser.disconnect(); } catch { /* ignore */ }
         try { nodes.panner.disconnect(); } catch { /* ignore */ }
+        if (nodes.audioEl) {
+          nodes.audioEl.pause();
+          nodes.audioEl.srcObject = null;
+        }
       }
       remoteAudioNodes.clear();
       peerCounterRef.current = 0;
