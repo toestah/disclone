@@ -985,8 +985,8 @@ export default function useVoice(channelId) {
     if (videoTracks.length > 0) {
       const label = videoTracks[0].label || '';
       // Chrome tab capture gives label like "Tab Title" or "Tab Title - Site"
-      // Filter out generic/useless labels
-      const generic = /^(screen:|entire screen|window:|$)/i;
+      // Filter out generic/useless labels and internal Chrome stream URLs
+      const generic = /^(screen:|entire screen|window:|web-contents-media-stream:|:\/\/|$)/i;
       if (label && !generic.test(label)) {
         shareTitle = label;
       }
