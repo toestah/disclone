@@ -27,6 +27,76 @@ function StatusDot({ status, className = '' }) {
   return <div className={`${config.color} rounded-full ${className}`} />;
 }
 
+function JukeboxCard({ sharingUser, isSharing, musicVolume, setMusicVolume, shareVolume, setShareVolume }) {
+  const containerRef = useRef(null);
+  const titleRef = useRef(null);
+
+  const title = sharingUser.title || 'Sharing Audio';
+
+  // Measure overflow and apply marquee animation directly on DOM
+  useEffect(() => {
+    const el = titleRef.current;
+    const container = containerRef.current;
+    if (!el || !container) return;
+    const diff = el.scrollWidth - container.clientWidth;
+    if (diff > 2) {
+      el.classList.add('jukebox-title-scroll');
+      el.style.setProperty('--overflow', `${-diff}px`);
+    } else {
+      el.classList.remove('jukebox-title-scroll');
+      el.style.removeProperty('--overflow');
+    }
+  });
+
+  return (
+    <div className="mx-1 mb-1.5 rounded-lg bg-discord-green/10 border border-discord-green/20 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-1.5 px-2.5 pt-2 pb-1">
+        <svg className="w-3.5 h-3.5 text-discord-green flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+        </svg>
+        <span className="text-[10px] font-bold text-discord-green uppercase tracking-wider">Now Playing</span>
+      </div>
+      {/* Scrolling title */}
+      <div ref={containerRef} className="px-2.5 overflow-hidden jukebox-title-mask">
+        <div
+          ref={titleRef}
+          className="text-[13px] text-white font-medium whitespace-nowrap"
+        >
+          {title}
+        </div>
+      </div>
+      {/* Shared by */}
+      <div className="px-2.5 mt-0.5">
+        <span className="text-[11px] text-discord-green/70">
+          {isSharing ? 'You are sharing' : `Shared by ${sharingUser.username}`}
+        </span>
+      </div>
+      {/* Volume slider */}
+      <div className="px-2.5 pt-1.5 pb-2">
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-[10px] text-discord-muted font-medium">Volume</label>
+          <span className="text-[10px] text-discord-muted tabular-nums">
+            {isSharing ? (shareVolume ?? 100) : (musicVolume ?? 80)}%
+          </span>
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value={isSharing ? (shareVolume ?? 100) : (musicVolume ?? 80)}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            if (isSharing) setShareVolume?.(v);
+            else setMusicVolume?.(v);
+          }}
+          className="voice-slider w-full"
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function Sidebar({
   channels,
   activeChannel,
@@ -230,32 +300,15 @@ export default function Sidebar({
               <div className="text-[11px] text-discord-muted truncate leading-tight mt-0.5">{voiceChannelName || 'Voice Chat'}</div>
             </div>
           </div>
-          {/* Music sharing indicator */}
-          {sharingUser && !isSharing && (
-            <div className="flex items-center gap-1.5 px-2 py-1 mb-1.5 mx-1 rounded bg-discord-green/10 text-discord-green">
-              <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
-              </svg>
-              <span className="text-[11px] font-medium truncate">{sharingUser.username} is sharing audio</span>
-            </div>
-          )}
-          {/* Presenter volume slider — shown when sharing */}
-          {isSharing && (
-            <div className="px-2 py-1 mb-1.5 mx-1 rounded bg-discord-green/10">
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-[11px] text-discord-green font-medium">Share Volume</label>
-                <span className="text-[10px] text-discord-green/70 tabular-nums">{shareVolume ?? 100}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={shareVolume ?? 100}
-                onChange={(e) => setShareVolume?.(Number(e.target.value))}
-                className="voice-slider w-full"
-              />
-            </div>
-          )}
+          {/* Jukebox card — shown when someone is sharing audio */}
+          {sharingUser && <JukeboxCard
+            sharingUser={sharingUser}
+            isSharing={isSharing}
+            musicVolume={musicVolume}
+            setMusicVolume={setMusicVolume}
+            shareVolume={shareVolume}
+            setShareVolume={setShareVolume}
+          />}
           <div className="flex items-center gap-1 px-1">
             <button
               onClick={toggleMute}
@@ -397,26 +450,6 @@ export default function Sidebar({
               </div>
             )}
 
-            {/* Music volume slider — only shown when someone is sharing */}
-            {sharingUser && (
-              <div className="mt-3 pt-3 border-t border-white/5">
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-[12px] text-discord-text">Music Volume</label>
-                  <span className="text-[11px] text-discord-muted tabular-nums">{musicVolume ?? 80}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={musicVolume ?? 80}
-                  onChange={(e) => setMusicVolume?.(Number(e.target.value))}
-                  className="voice-slider w-full"
-                />
-                <div className="text-[10px] text-discord-muted/60 mt-1">
-                  {sharingUser.username} is sharing audio
-                </div>
-              </div>
-            )}
           </div>
         )}
 

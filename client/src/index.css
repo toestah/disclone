@@ -41,6 +41,19 @@ body {
   animation: speaking-pulse 1.2s ease-in-out infinite;
 }
 
+/* Jukebox marquee — ping-pong scroll for overflowing titles */
+@keyframes marquee-scroll {
+  0%, 20% { transform: translateX(0); }
+  80%, 100% { transform: translateX(var(--overflow, -100px)); }
+}
+.jukebox-title-scroll {
+  animation: marquee-scroll 8s ease-in-out infinite alternate;
+}
+.jukebox-title-mask {
+  mask-image: linear-gradient(to right, transparent, black 8px, black calc(100% - 8px), transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 8px, black calc(100% - 8px), transparent);
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;

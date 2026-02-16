@@ -362,9 +362,13 @@ export default function useVoice(channelId) {
 
     // ── Music sharing event handlers ──
 
-    function handleMusicStarted({ socketId, username }) {
-      setSharingUser({ socketId, username });
+    function handleMusicStarted({ socketId, username, title }) {
+      setSharingUser({ socketId, username, title: title || '' });
       ensureMusicPlayback(); // preload worklet on share start
+    }
+
+    function handleMusicTitle({ title }) {
+      setSharingUser((prev) => prev ? { ...prev, title: title || '' } : prev);
     }
 
     function handleMusicStopped() {
@@ -438,6 +442,7 @@ export default function useVoice(channelId) {
     socket.on('music:started', handleMusicStarted);
     socket.on('music:stopped', handleMusicStopped);
     socket.on('music:chunk', handleMusicChunk);
+    socket.on('music:title', handleMusicTitle);
 
     // ── Init ──
 
@@ -456,6 +461,10 @@ export default function useVoice(channelId) {
             peerCapsRef.current.set(peer.socketId, peer.capabilities || {});
           }
           console.log('[Voice] Peer capabilities:', Object.fromEntries(peerCapsRef.current));
+        }
+        // Show jukebox if someone is already sharing in this room
+        if (response?.musicSharer) {
+          setSharingUser(response.musicSharer);
         }
       });
 
@@ -821,6 +830,7 @@ export default function useVoice(channelId) {
       socket.off('music:started', handleMusicStarted);
       socket.off('music:stopped', handleMusicStopped);
       socket.off('music:chunk', handleMusicChunk);
+      socket.off('music:title', handleMusicTitle);
 
       // Clean up music sharing if active
       if (isSharingRef.current) {
@@ -969,8 +979,19 @@ export default function useVoice(channelId) {
       return;
     }
 
-    // Discard video track immediately
-    for (const track of stream.getVideoTracks()) {
+    // Extract tab title from video track label before discarding
+    let shareTitle = '';
+    const videoTracks = stream.getVideoTracks();
+    if (videoTracks.length > 0) {
+      const label = videoTracks[0].label || '';
+      // Chrome tab capture gives label like "Tab Title" or "Tab Title - Site"
+      // Filter out generic/useless labels
+      const generic = /^(screen:|entire screen|window:|$)/i;
+      if (label && !generic.test(label)) {
+        shareTitle = label;
+      }
+    }
+    for (const track of videoTracks) {
       track.stop();
     }
 
@@ -1065,7 +1086,7 @@ export default function useVoice(channelId) {
       musicStreamRef.current = stream;
 
       // Tell server we're sharing
-      socket.emit('music:start', { channelId: channelIdRef.current }, (response) => {
+      socket.emit('music:start', { channelId: channelIdRef.current, title: shareTitle }, (response) => {
         if (!response?.success) {
           // Failed — clean up
           alert(response?.error || 'Could not start sharing');
@@ -1079,7 +1100,7 @@ export default function useVoice(channelId) {
         }
         setIsSharing(true);
         isSharingRef.current = true;
-        setSharingUser({ socketId: socket.id, username: 'You' });
+        setSharingUser({ socketId: socket.id, username: 'You', title: shareTitle });
       });
 
       // Auto-stop when the browser's "Stop sharing" bar is clicked

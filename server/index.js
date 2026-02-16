@@ -69,7 +69,7 @@ const mutedState = new Map();
 // Client capabilities: socketId -> { opus: boolean }
 const clientCapabilities = new Map();
 
-// Music sharers: channelId -> socketId (one sharer per room)
+// Music sharers: channelId -> { socketId, title } (one sharer per room)
 const musicSharers = new Map();
 
 // Last-N speaker forwarding: only relay audio from top N active speakers
@@ -376,7 +376,21 @@ io.on('connection', (socket) => {
       capabilities: clientCapabilities.get(socket.id) || {},
     });
 
-    callback?.({ success: true, peers: existingPeers });
+    // Include active music sharer so late joiners see the jukebox
+    let musicSharer = null;
+    const activeSharer = musicSharers.get(channelId);
+    if (activeSharer) {
+      const sharerSession = activeSessions.get(activeSharer.socketId);
+      if (sharerSession) {
+        musicSharer = {
+          socketId: activeSharer.socketId,
+          username: sharerSession.username,
+          title: activeSharer.title || '',
+        };
+      }
+    }
+
+    callback?.({ success: true, peers: existingPeers, musicSharer });
 
     io.emit('voice:room-update', {
       channelId,
@@ -392,7 +406,7 @@ io.on('connection', (socket) => {
     const room = voiceRooms.get(channelId);
     if (room) {
       // Clean up music sharing if this user was sharing
-      if (musicSharers.get(channelId) === socket.id) {
+      if (musicSharers.get(channelId)?.socketId === socket.id) {
         musicSharers.delete(channelId);
         socket.to(`voice:${channelId}`).emit('music:stopped', {
           channelId,
@@ -483,7 +497,7 @@ io.on('connection', (socket) => {
 
   // ── Music Sharing ──
 
-  socket.on('music:start', ({ channelId }, callback) => {
+  socket.on('music:start', ({ channelId, title }, callback) => {
     const session = activeSessions.get(socket.id);
     if (!session) return callback?.({ success: false, error: 'Not logged in' });
 
@@ -493,22 +507,24 @@ io.on('connection', (socket) => {
     }
 
     const existingSharer = musicSharers.get(channelId);
-    if (existingSharer && existingSharer !== socket.id) {
-      const sharerSession = activeSessions.get(existingSharer);
+    if (existingSharer && existingSharer.socketId !== socket.id) {
+      const sharerSession = activeSessions.get(existingSharer.socketId);
       return callback?.({ success: false, error: `${sharerSession?.username || 'Someone'} is already sharing` });
     }
 
-    musicSharers.set(channelId, socket.id);
+    const safeTitle = typeof title === 'string' ? title.slice(0, 200) : '';
+    musicSharers.set(channelId, { socketId: socket.id, title: safeTitle });
     socket.to(`voice:${channelId}`).emit('music:started', {
       channelId,
       socketId: socket.id,
       username: session.username,
+      title: safeTitle,
     });
     callback?.({ success: true });
   });
 
   socket.on('music:stop', ({ channelId }) => {
-    if (musicSharers.get(channelId) !== socket.id) return;
+    if (musicSharers.get(channelId)?.socketId !== socket.id) return;
     musicSharers.delete(channelId);
     socket.to(`voice:${channelId}`).emit('music:stopped', {
       channelId,
@@ -519,7 +535,7 @@ io.on('connection', (socket) => {
   socket.on('music:chunk', ({ channelId, data, seq }) => {
     const room = voiceRooms.get(channelId);
     if (!room || !room.has(socket.id)) return;
-    if (musicSharers.get(channelId) !== socket.id) return;
+    if (musicSharers.get(channelId)?.socketId !== socket.id) return;
     // Defer music relay so voice (audio:chunk) gets event-loop priority
     setImmediate(() => {
       socket.to(`voice:${channelId}`).volatile.emit('music:chunk', {
@@ -527,6 +543,17 @@ io.on('connection', (socket) => {
         data,
         seq,
       });
+    });
+  });
+
+  socket.on('music:title', ({ channelId, title }) => {
+    const sharer = musicSharers.get(channelId);
+    if (!sharer || sharer.socketId !== socket.id) return;
+    const safeTitle = typeof title === 'string' ? title.slice(0, 200) : '';
+    sharer.title = safeTitle;
+    socket.to(`voice:${channelId}`).emit('music:title', {
+      channelId,
+      title: safeTitle,
     });
   });
 
@@ -668,7 +695,7 @@ io.on('connection', (socket) => {
     for (const [roomId, room] of voiceRooms) {
       if (room.has(socket.id)) {
         // Clean up music sharing if this user was sharing
-        if (musicSharers.get(roomId) === socket.id) {
+        if (musicSharers.get(roomId)?.socketId === socket.id) {
           musicSharers.delete(roomId);
           socket.to(`voice:${roomId}`).emit('music:stopped', {
             channelId: roomId,
