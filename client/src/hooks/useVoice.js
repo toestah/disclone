@@ -41,7 +41,7 @@ function playChime(ctxRef, direction) {
 
 // ── Constants ───────────────────────────────────────────────────
 
-const GATE_HOLD_MS = 400;
+const GATE_HOLD_MS = 250;
 const MIN_NOISE_FLOOR = 3;
 
 /**
@@ -668,7 +668,8 @@ export default function useVoice(channelId) {
         let frameTimestamp = 0;
         let gateWasOpen = false;
         let fadeOutRemaining = 0;
-        const FADE_OUT_FRAMES = 5; // 5 × 20ms = 100ms fade-out
+        let consecutiveSpeechFrames = 0; // transient rejection — require 2+ frames
+        const FADE_OUT_FRAMES = 3; // 3 × 20ms = 60ms fade-out
         const FADE_IN_SAMPLES = Math.round(nativeRate * 0.008); // 8ms fade-in
 
         captureNode.port.onmessage = (e) => {
@@ -715,7 +716,7 @@ export default function useVoice(channelId) {
             noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
           }
 
-          // Determine speaking state
+          // Determine speaking state (per-frame raw detection)
           let speaking;
           if (sensitivityModeRef.current === 'auto') {
             if (noiseSuppressionRef.current && rnnoiseRef.current) {
@@ -723,7 +724,7 @@ export default function useVoice(channelId) {
               const avgVadProb = acc.count > 0 ? acc.sum / acc.count : 0;
               acc.sum = 0;
               acc.count = 0;
-              speaking = avgVadProb > 0.5;
+              speaking = avgVadProb > 0.65; // stricter — rejects keyboard clicks, claps
             } else {
               speaking = speechEnergy > noiseFloor + 14;
             }
@@ -732,15 +733,25 @@ export default function useVoice(channelId) {
             speaking = speechEnergy > noiseFloor + margin;
           }
 
+          // Transient rejection: require 2+ consecutive speech frames before
+          // opening the gate. Single-frame events (keyboard clicks, claps)
+          // don't trigger transmission.
           if (speaking) {
+            consecutiveSpeechFrames++;
+          } else {
+            consecutiveSpeechFrames = 0;
+          }
+          const confirmedSpeech = consecutiveSpeechFrames >= 2;
+
+          if (confirmedSpeech) {
             lastSpeechTimeRef.current = performance.now();
           }
-          if (speaking !== wasSpeakingRef.current) {
-            wasSpeakingRef.current = speaking;
-            setIsSpeaking(speaking);
+          if (confirmedSpeech !== wasSpeakingRef.current) {
+            wasSpeakingRef.current = confirmedSpeech;
+            setIsSpeaking(confirmedSpeech);
             socket.emit('voice:speaking', {
               channelId: channelIdRef.current,
-              speaking,
+              speaking: confirmedSpeech,
             });
           }
 
