@@ -66,16 +66,8 @@ const speakingState = new Map();
 // Muted state: socketId -> boolean
 const mutedState = new Map();
 
-// Client capabilities: socketId -> { opus: boolean }
-const clientCapabilities = new Map();
-
 // Music sharers: channelId -> { socketId, title } (one sharer per room)
 const musicSharers = new Map();
-
-// Last-N speaker forwarding: only relay audio from top N active speakers
-const MAX_ACTIVE_SPEAKERS = 5;
-// channelId -> Map<socketId, startTime> (when they started speaking)
-const roomSpeakers = new Map();
 
 // DM channels: username -> Set<dmChannelId>
 const userDMChannels = new Map();
@@ -319,7 +311,7 @@ io.on('connection', (socket) => {
 
   // ── Voice Channels ──
 
-  socket.on('voice:join', ({ channelId, capabilities }, callback) => {
+  socket.on('voice:join', ({ channelId }, callback) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
     console.log(`[Voice] ${session.username} (${socket.id}) joining ${channelId}`);
@@ -332,7 +324,6 @@ io.on('connection', (socket) => {
       if (room.has(socket.id)) {
         room.delete(socket.id);
         socket.leave(`voice:${roomId}`);
-        roomSpeakers.get(roomId)?.delete(socket.id);
         socket.to(`voice:${roomId}`).emit('voice:user-left', {
           channelId: roomId,
           socketId: socket.id,
@@ -347,7 +338,6 @@ io.on('connection', (socket) => {
     // Join new voice room
     const room = voiceRooms.get(channelId);
     room.add(socket.id);
-    clientCapabilities.set(socket.id, capabilities || {});
     socket.join(`voice:${channelId}`);
 
     // Existing peers
@@ -360,7 +350,6 @@ io.on('connection', (socket) => {
             socketId: peerId,
             username: peerSession.username,
             avatarColor: peerSession.avatarColor,
-            capabilities: clientCapabilities.get(peerId) || {},
           });
         }
       }
@@ -373,7 +362,6 @@ io.on('connection', (socket) => {
       socketId: socket.id,
       username: session.username,
       avatarColor: session.avatarColor,
-      capabilities: clientCapabilities.get(socket.id) || {},
     });
 
     // Include active music sharer so late joiners see the jukebox
@@ -418,8 +406,6 @@ io.on('connection', (socket) => {
       socket.leave(`voice:${channelId}`);
       speakingState.delete(socket.id);
       mutedState.delete(socket.id);
-      clientCapabilities.delete(socket.id);
-      roomSpeakers.get(channelId)?.delete(socket.id);
 
       socket.to(`voice:${channelId}`).emit('voice:user-left', {
         channelId,
@@ -438,19 +424,6 @@ io.on('connection', (socket) => {
 
   socket.on('voice:speaking', ({ channelId, speaking }) => {
     speakingState.set(socket.id, speaking);
-
-    // Track active speakers for last-N forwarding
-    let speakers = roomSpeakers.get(channelId);
-    if (!speakers) {
-      speakers = new Map();
-      roomSpeakers.set(channelId, speakers);
-    }
-    if (speaking) {
-      speakers.set(socket.id, Date.now());
-    } else {
-      speakers.delete(socket.id);
-    }
-
     socket.to(`voice:${channelId}`).emit('voice:speaking', {
       socketId: socket.id,
       speaking,
@@ -459,40 +432,44 @@ io.on('connection', (socket) => {
 
   socket.on('voice:muted', ({ channelId, muted }) => {
     mutedState.set(socket.id, muted);
-    // Broadcast updated room members (includes muted state)
     io.emit('voice:room-update', {
       channelId,
       members: getVoiceRoomMembers(channelId),
     });
   });
 
-  // ── Server-relayed audio ──
+  // ── WebRTC Signaling Relay ──
+  // Relay offer/answer/ice-candidate between peers in the same voice room.
 
-  socket.on('audio:chunk', ({ channelId, data, codec, seq, sampleRate }) => {
-    // Only relay if sender is actually in this voice room
-    const room = voiceRooms.get(channelId);
-    if (!room || !room.has(socket.id)) return;
-
-    // Last-N forwarding: when room has many users, only relay top N speakers
-    if (room.size > MAX_ACTIVE_SPEAKERS) {
-      const speakers = roomSpeakers.get(channelId);
-      if (speakers && speakers.size > MAX_ACTIVE_SPEAKERS) {
-        // More speakers than slots — only relay if sender is among top N (most recent start)
-        const sorted = [...speakers.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, MAX_ACTIVE_SPEAKERS);
-        if (!sorted.some(([id]) => id === socket.id)) return;
-      }
+  function findPeerVoiceRoom(socketId) {
+    for (const [roomId, room] of voiceRooms) {
+      if (room.has(socketId)) return roomId;
     }
+    return null;
+  }
 
-    // volatile = OK to drop if transport is congested (real-time audio)
-    socket.to(`voice:${channelId}`).volatile.emit('audio:chunk', {
-      from: socket.id,
-      data,
-      codec,
-      seq,
-      sampleRate,
-    });
+  socket.on('webrtc:offer', ({ targetId, offer }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('webrtc:offer', { from: socket.id, offer });
+  });
+
+  socket.on('webrtc:answer', ({ targetId, answer }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('webrtc:answer', { from: socket.id, answer });
+  });
+
+  socket.on('webrtc:ice-candidate', ({ targetId, candidate }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('webrtc:ice-candidate', { from: socket.id, candidate });
   });
 
   // ── Music Sharing ──
@@ -536,7 +513,7 @@ io.on('connection', (socket) => {
     const room = voiceRooms.get(channelId);
     if (!room || !room.has(socket.id)) return;
     if (musicSharers.get(channelId)?.socketId !== socket.id) return;
-    // Defer music relay so voice (audio:chunk) gets event-loop priority
+    // Defer music relay so other event handlers get event-loop priority
     setImmediate(() => {
       socket.to(`voice:${channelId}`).volatile.emit('music:chunk', {
         from: socket.id,
@@ -704,7 +681,6 @@ io.on('connection', (socket) => {
         }
 
         room.delete(socket.id);
-        roomSpeakers.get(roomId)?.delete(socket.id);
         socket.to(`voice:${roomId}`).emit('voice:user-left', {
           channelId: roomId,
           socketId: socket.id,
@@ -718,7 +694,6 @@ io.on('connection', (socket) => {
 
     speakingState.delete(socket.id);
     mutedState.delete(socket.id);
-    clientCapabilities.delete(socket.id);
     activeSessions.delete(socket.id);
     io.emit('users:update', getAllUsersForBroadcast());
   });

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSocket } from './useSocket.jsx';
-import { loadRnnoise, RnnoiseDenoiser, denoiseFrame } from '../lib/rnnoise.js';
+import { loadRnnoise, RnnoiseDenoiser } from '../lib/rnnoise.js';
 
 // ── Audio chimes ────────────────────────────────────────────────
 
@@ -43,14 +43,18 @@ function playChime(ctxRef, direction) {
 
 const GATE_HOLD_MS = 250;
 const MIN_NOISE_FLOOR = 3;
+const VAD_POLL_MS = 50;
 
-/**
- * Compute margin above adaptive noise floor from sensitivity slider (0–100).
- * Higher sensitivity → smaller margin → easier to trigger.
- *   sensitivity  0 → margin 25 (need to be very loud above noise)
- *   sensitivity 50 → margin 14
- *   sensitivity 100 → margin 3
- */
+// Stereo pan positions for peers
+const PAN_POSITIONS = [0, -0.4, 0.4, -0.2, 0.2, -0.6, 0.6, -0.1, 0.1, -0.5, 0.5];
+
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ],
+};
+
 function computeMargin(sensitivity) {
   return Math.round(3 + 22 * (1 - sensitivity / 100));
 }
@@ -65,12 +69,10 @@ function resampleCubic(input, fromRate, toRate) {
     const srcIdx = i * ratio;
     const idx1 = Math.floor(srcIdx);
     const frac = srcIdx - idx1;
-    // Catmull-Rom spline: 4-point interpolation
     const idx0 = Math.max(idx1 - 1, 0);
     const idx2 = Math.min(idx1 + 1, last);
     const idx3 = Math.min(idx1 + 2, last);
     const p0 = input[idx0], p1 = input[idx1], p2 = input[idx2], p3 = input[idx3];
-    // Catmull-Rom coefficients
     const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
     const b = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3;
     const c = -0.5 * p0 + 0.5 * p2;
@@ -93,12 +95,8 @@ const sharingSupported = typeof navigator !== 'undefined' &&
   typeof AudioDecoder !== 'undefined';
 
 // ── Silent WAV for mobile keepalive ─────────────────────────────
-// Programmatically build a 1-second 8kHz mono 8-bit silent WAV (~8KB).
-// Chrome's media pipeline enters a tight seek-play-end loop with 0-duration
-// WAVs, allocating C++ buffers on each iteration. 1-second duration means
-// Chrome loops once/second instead.
 function generateSilentWavDataUri() {
-  const rate = 8000, samples = 8000; // 1 second
+  const rate = 8000, samples = 8000;
   const buf = new ArrayBuffer(44 + samples);
   const v = new DataView(buf);
   const s = (o, str) => { for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i)); };
@@ -106,12 +104,32 @@ function generateSilentWavDataUri() {
   s(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
   v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
   s(36, 'data'); v.setUint32(40, samples, true);
-  new Uint8Array(buf, 44).fill(128); // 8-bit silence = 128
+  new Uint8Array(buf, 44).fill(128);
   let bin = ''; const bytes = new Uint8Array(buf);
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return 'data:audio/wav;base64,' + btoa(bin);
 }
 const SILENT_WAV_URI = generateSilentWavDataUri();
+
+// ── SDP munging for Opus FEC + DTX + bitrate ────────────────────
+
+function mungeOpusSDP(sdp) {
+  const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/);
+  if (!match) return sdp;
+  const pt = match[1];
+  const params = 'maxaveragebitrate=64000;useinbandfec=1;usedtx=1';
+  const fmtpRegex = new RegExp(`a=fmtp:${pt} (.+)`);
+  const fmtpMatch = sdp.match(fmtpRegex);
+  if (fmtpMatch) {
+    // Append to existing fmtp line
+    return sdp.replace(fmtpRegex, `a=fmtp:${pt} ${fmtpMatch[1]};${params}`);
+  }
+  // Insert new fmtp line after rtpmap
+  return sdp.replace(
+    `a=rtpmap:${pt} opus/48000/2`,
+    `a=rtpmap:${pt} opus/48000/2\r\na=fmtp:${pt} ${params}`
+  );
+}
 
 // ── Hook ────────────────────────────────────────────────────────
 
@@ -139,13 +157,14 @@ export default function useVoice(channelId) {
   });
   const [noiseSuppression, setNoiseSuppressionState] = useState(() => {
     const saved = localStorage.getItem('disclone_noise_suppression');
-    return saved !== null ? saved === 'true' : true; // default ON
+    return saved !== null ? saved === 'true' : true;
   });
   const [sensitivityMode, setSensitivityModeState] = useState(() => {
     const saved = localStorage.getItem('disclone_sensitivity_mode');
-    return saved === 'manual' ? 'manual' : 'auto'; // default auto
+    return saved === 'manual' ? 'manual' : 'auto';
   });
 
+  // ── Refs ──
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const wasSpeakingRef = useRef(false);
@@ -155,10 +174,16 @@ export default function useVoice(channelId) {
   const isMutedRef = useRef(false);
   const sensitivityRef = useRef(sensitivity);
   const lastSpeechTimeRef = useRef(0);
-  const playbackNodeRef = useRef(null);
-  const encoderRef = useRef(null);
-  const decodersRef = useRef(new Map());
-  const peerCapsRef = useRef(new Map());
+
+  // WebRTC refs
+  const peerConnectionsRef = useRef(new Map()); // peerId → RTCPeerConnection
+  const remoteAudioNodesRef = useRef(new Map()); // peerId → { source, analyser, panner }
+  const processedTrackRef = useRef(null);
+  const vadGainRef = useRef(null);
+  const vadIntervalRef = useRef(null);
+  const peerCounterRef = useRef(0);
+
+  // Music refs (unchanged)
   const musicStreamRef = useRef(null);
   const musicContextRef = useRef(null);
   const musicEncoderRef = useRef(null);
@@ -173,11 +198,11 @@ export default function useVoice(channelId) {
   const noiseSuppressionRef = useRef(noiseSuppression);
   const rnnoiseRef = useRef(null);
   const sensitivityModeRef = useRef(sensitivityMode);
-  const vadProbAccRef = useRef({ sum: 0, count: 0 });
   const musicAnalyserRef = useRef(null);
   const keepaliveAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
 
+  // Keep refs in sync
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
   sensitivityRef.current = sensitivity;
@@ -200,6 +225,11 @@ export default function useVoice(channelId) {
   const setNoiseSuppression = useCallback(async (enabled) => {
     setNoiseSuppressionState(enabled);
     localStorage.setItem('disclone_noise_suppression', String(enabled));
+    // Toggle browser-level noise suppression on the mic track
+    const track = localStreamRef.current?.getAudioTracks()[0];
+    if (track) {
+      try { await track.applyConstraints({ noiseSuppression: enabled }); } catch { /* ignore */ }
+    }
     if (enabled && !rnnoiseRef.current) {
       try {
         const module = await loadRnnoise();
@@ -223,6 +253,10 @@ export default function useVoice(channelId) {
     if (!channelId || !socket) return;
     let cancelled = false;
 
+    // Capture ref values for cleanup (avoids react-hooks/exhaustive-deps warnings)
+    const peerConnections = peerConnectionsRef.current;
+    const remoteAudioNodes = remoteAudioNodesRef.current;
+
     // ── Playback AudioContext ──
     try {
       if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
@@ -237,87 +271,21 @@ export default function useVoice(channelId) {
 
     playChime(playbackCtxRef, 'up');
 
-    // ── Receive & play remote audio ──
-
-    function handleAudioChunk({ from, data, codec, seq, sampleRate }) {
-      const playNode = playbackNodeRef.current;
-      if (!playNode) return;
-
-      // PLC is handled entirely by the playback worklet (inline frame repetition
-      // with progressive fadeout + fade-in). No main-thread PLC needed.
-
-      if (codec === 'opus' && typeof AudioDecoder !== 'undefined') {
-        let decoder = decodersRef.current.get(from);
-        if (!decoder) {
-          const playRate = playbackCtxRef.current?.sampleRate || 48000;
-          decoder = new AudioDecoder({
-            output: (audioData) => {
-              try {
-                let pcm = new Float32Array(audioData.numberOfFrames);
-                audioData.copyTo(pcm, { planeIndex: 0 });
-                audioData.close();
-                if (playRate !== 48000) {
-                  pcm = resampleCubic(pcm, 48000, playRate);
-                }
-                playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
-              } catch (e) {
-                console.error('[Voice] Decode output error:', e);
-              }
-            },
-            error: (e) => {
-              console.error('[Voice] Decoder error:', e);
-              decodersRef.current.delete(from);
-            },
-          });
-          decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 1 });
-          decodersRef.current.set(from, decoder);
-        }
-        try {
-          const chunk = new EncodedAudioChunk({
-            type: 'key',
-            timestamp: (seq || 0) * 20000,
-            data,
-          });
-          decoder.decode(chunk);
-        } catch (e) {
-          console.error('[Voice] Decode error:', e);
-        }
-      } else {
-        // If Opus-encoded but we can't decode, skip (don't misinterpret as PCM)
-        if (codec === 'opus') return;
-        // PCM fallback
-        const int16 = new Int16Array(data);
-        let pcm = new Float32Array(int16.length);
-        for (let i = 0; i < int16.length; i++) {
-          pcm[i] = int16[i] / 32768;
-        }
-        const playRate = playbackCtxRef.current?.sampleRate || 48000;
-        const srcRate = sampleRate || 48000;
-        if (srcRate !== playRate) {
-          pcm = resampleCubic(pcm, srcRate, playRate);
-        }
-        playNode.port.postMessage({ peerId: from, pcm }, [pcm.buffer]);
-      }
-    }
-
     // ── Socket event handlers ──
 
-    function handleUserJoined({ socketId, capabilities }) {
-      console.log(`[Voice] → user-joined: ${socketId}`, capabilities);
-      if (capabilities) peerCapsRef.current.set(socketId, capabilities);
+    function handleUserJoined({ socketId }) {
+      console.log(`[Voice] → user-joined: ${socketId}`);
       playChime(playbackCtxRef, 'up');
+      // Existing peer creates offer to new joiner
+      if (processedTrackRef.current) {
+        createPeerConnection(socketId, true);
+      }
     }
 
     function handleUserLeft({ socketId }) {
       console.log(`[Voice] → user-left: ${socketId}`);
-      peerCapsRef.current.delete(socketId);
       playChime(playbackCtxRef, 'down');
-      const decoder = decodersRef.current.get(socketId);
-      if (decoder) {
-        try { decoder.close(); } catch {}
-        decodersRef.current.delete(socketId);
-      }
-      playbackNodeRef.current?.port.postMessage({ removePeer: socketId });
+      closePeerConnection(socketId);
       setSpeakingPeers((prev) => {
         const s = new Set(prev);
         s.delete(socketId);
@@ -334,8 +302,155 @@ export default function useVoice(channelId) {
       });
     }
 
+    // ── WebRTC signaling handlers ──
+
+    function handleOffer({ from, offer }) {
+      console.log(`[Voice] ← webrtc:offer from ${from}`);
+      handleRemoteOffer(from, offer);
+    }
+
+    function handleAnswer({ from, answer }) {
+      console.log(`[Voice] ← webrtc:answer from ${from}`);
+      const pc = peerConnectionsRef.current.get(from);
+      if (!pc) return;
+      pc.setRemoteDescription(new RTCSessionDescription(answer)).catch((e) => {
+        console.error('[Voice] setRemoteDescription(answer) error:', e);
+      });
+    }
+
+    function handleIceCandidate({ from, candidate }) {
+      const pc = peerConnectionsRef.current.get(from);
+      if (!pc) return;
+      if (candidate) {
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      }
+    }
+
+    // ── Peer connection helpers ──
+
+    function createPeerConnection(peerId, isOfferer) {
+      if (peerConnectionsRef.current.has(peerId)) {
+        closePeerConnection(peerId);
+      }
+
+      const pc = new RTCPeerConnection(ICE_CONFIG);
+      peerConnectionsRef.current.set(peerId, pc);
+      console.log(`[Voice] Creating PC for ${peerId} (offerer=${isOfferer})`);
+
+      // Add our processed audio track
+      const track = processedTrackRef.current;
+      if (track) {
+        pc.addTrack(track);
+      }
+
+      // ICE candidate relay
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          socket.emit('webrtc:ice-candidate', {
+            targetId: peerId,
+            candidate: e.candidate.toJSON(),
+          });
+        }
+      };
+
+      // Remote audio track
+      pc.ontrack = (e) => {
+        console.log(`[Voice] ontrack from ${peerId}`);
+        setupRemoteAudio(peerId, e.streams[0] || new MediaStream([e.track]));
+      };
+
+      // Connection state monitoring
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        console.log(`[Voice] PC ${peerId} state: ${state}`);
+        if (state === 'failed' || state === 'disconnected') {
+          closePeerConnection(peerId);
+        }
+      };
+
+      if (isOfferer) {
+        pc.createOffer().then((offer) => {
+          offer.sdp = mungeOpusSDP(offer.sdp);
+          return pc.setLocalDescription(offer);
+        }).then(() => {
+          socket.emit('webrtc:offer', {
+            targetId: peerId,
+            offer: pc.localDescription.toJSON(),
+          });
+        }).catch((e) => {
+          console.error('[Voice] createOffer error:', e);
+        });
+      }
+
+      return pc;
+    }
+
+    async function handleRemoteOffer(peerId, offer) {
+      const pc = createPeerConnection(peerId, false);
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        answer.sdp = mungeOpusSDP(answer.sdp);
+        await pc.setLocalDescription(answer);
+        socket.emit('webrtc:answer', {
+          targetId: peerId,
+          answer: pc.localDescription.toJSON(),
+        });
+      } catch (e) {
+        console.error('[Voice] handleRemoteOffer error:', e);
+      }
+    }
+
+    function setupRemoteAudio(peerId, stream) {
+      // Clean up any existing nodes for this peer
+      cleanupRemoteAudio(peerId);
+
+      const playCtx = playbackCtxRef.current;
+      if (!playCtx || playCtx.state === 'closed') return;
+
+      const source = playCtx.createMediaStreamSource(stream);
+      const analyser = playCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.3;
+
+      const panner = playCtx.createStereoPanner();
+      const panIdx = peerCounterRef.current % PAN_POSITIONS.length;
+      panner.pan.value = PAN_POSITIONS[panIdx];
+      peerCounterRef.current++;
+
+      source.connect(analyser);
+      analyser.connect(panner);
+      if (masterCompressorRef.current) {
+        panner.connect(masterCompressorRef.current);
+      } else {
+        panner.connect(playCtx.destination);
+      }
+
+      remoteAudioNodesRef.current.set(peerId, { source, analyser, panner, stream });
+    }
+
+    function cleanupRemoteAudio(peerId) {
+      const nodes = remoteAudioNodesRef.current.get(peerId);
+      if (!nodes) return;
+      try { nodes.source.disconnect(); } catch { /* ignore */ }
+      try { nodes.analyser.disconnect(); } catch { /* ignore */ }
+      try { nodes.panner.disconnect(); } catch { /* ignore */ }
+      remoteAudioNodesRef.current.delete(peerId);
+    }
+
+    function closePeerConnection(peerId) {
+      const pc = peerConnectionsRef.current.get(peerId);
+      if (pc) {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+        peerConnectionsRef.current.delete(peerId);
+      }
+      cleanupRemoteAudio(peerId);
+    }
+
     // ── Lazy music playback worklet ──
-    // Only loaded on first music:started or music:chunk event.
     let musicWorkletPromise = null;
     async function ensureMusicPlayback() {
       if (musicPlaybackNodeRef.current) return musicPlaybackNodeRef.current;
@@ -372,7 +487,7 @@ export default function useVoice(channelId) {
 
     function handleMusicStarted({ socketId, username, title }) {
       setSharingUser({ socketId, username, title: title || '' });
-      ensureMusicPlayback(); // preload worklet on share start
+      ensureMusicPlayback();
     }
 
     function handleMusicTitle({ title }) {
@@ -381,9 +496,7 @@ export default function useVoice(channelId) {
 
     function handleMusicStopped() {
       setSharingUser(null);
-      // Clear music playback buffer
       musicPlaybackNodeRef.current?.port.postMessage({ clear: true });
-      // Close music decoder
       if (musicDecoderRef.current) {
         try { musicDecoderRef.current.close(); } catch { /* ignore */ }
         musicDecoderRef.current = null;
@@ -394,7 +507,6 @@ export default function useVoice(channelId) {
       const musicNode = await ensureMusicPlayback();
       if (!musicNode || cancelled) return;
 
-      // Get or create stereo Opus decoder for music
       let decoder = musicDecoderRef.current;
       if (!decoder) {
         const playRate = playbackCtxRef.current?.sampleRate || 48000;
@@ -404,8 +516,6 @@ export default function useVoice(channelId) {
               const frames = audioData.numberOfFrames;
               let left = new Float32Array(frames);
               let right = new Float32Array(frames);
-              // Force f32-planar output — Opus decoder may output f32 (interleaved)
-              // which makes planeIndex 0 contain ALL channels interleaved
               audioData.copyTo(left, { planeIndex: 0, format: 'f32-planar' });
               if (audioData.numberOfChannels >= 2) {
                 audioData.copyTo(right, { planeIndex: 1, format: 'f32-planar' });
@@ -443,7 +553,10 @@ export default function useVoice(channelId) {
       }
     }
 
-    socket.on('audio:chunk', handleAudioChunk);
+    // ── Register signaling listeners BEFORE voice:join ──
+    socket.on('webrtc:offer', handleOffer);
+    socket.on('webrtc:answer', handleAnswer);
+    socket.on('webrtc:ice-candidate', handleIceCandidate);
     socket.on('voice:user-joined', handleUserJoined);
     socket.on('voice:user-left', handleUserLeft);
     socket.on('voice:speaking', handleSpeaking);
@@ -455,29 +568,21 @@ export default function useVoice(channelId) {
     // ── Init ──
 
     async function init() {
-      // Emit voice:join immediately so user appears in channel list
-      // before async resource setup (worklet loads, mic permission, etc.).
-      // handleAudioChunk already has `if (!playNode) return` guard.
-      const hasOpus = typeof AudioEncoder !== 'undefined' && typeof AudioDecoder !== 'undefined';
+      // Join the voice room on the server
       console.log('[Voice] Joining', channelId);
-      socket.emit('voice:join', {
-        channelId,
-        capabilities: { opus: hasOpus },
-      }, (response) => {
-        if (response?.success && response.peers) {
-          for (const peer of response.peers) {
-            peerCapsRef.current.set(peer.socketId, peer.capabilities || {});
-          }
-          console.log('[Voice] Peer capabilities:', Object.fromEntries(peerCapsRef.current));
-        }
-        // Show jukebox if someone is already sharing in this room
-        if (response?.musicSharer) {
-          setSharingUser(response.musicSharer);
-        }
+      const joinResponse = await new Promise((resolve) => {
+        socket.emit('voice:join', { channelId }, resolve);
       });
 
-      try {
+      if (cancelled) return;
+      const existingPeers = joinResponse?.peers || [];
 
+      // Show jukebox if someone is already sharing
+      if (joinResponse?.musicSharer) {
+        setSharingUser(joinResponse.musicSharer);
+      }
+
+      try {
         // ── Master compressor for combined voice + music output ──
         const playCtx = playbackCtxRef.current;
         const masterCompressor = playCtx.createDynamicsCompressor();
@@ -489,30 +594,18 @@ export default function useVoice(channelId) {
         masterCompressor.connect(playCtx.destination);
         masterCompressorRef.current = masterCompressor;
 
-        // ── Setup playback AudioWorklet ──
-        await playCtx.audioWorklet.addModule('/playback-processor.js');
-        if (cancelled) return;
-        const playbackNode = new AudioWorkletNode(playCtx, 'playback-processor', {
-          outputChannelCount: [2],
-        });
-        playbackNode.connect(masterCompressor);
-        playbackNodeRef.current = playbackNode;
-
         // ── Mobile keepalive: silent <audio> element ──
-        // Mobile browsers (iOS/Android) suspend pages when the screen locks
-        // UNLESS an HTMLAudioElement is actively playing. WebAudio alone isn't enough.
-        // A looping silent audio clip tells the OS "this tab is playing media".
         try {
           const audio = new Audio(SILENT_WAV_URI);
           audio.loop = true;
-          audio.volume = 0.01; // near-silent but non-zero so OS doesn't skip it
+          audio.volume = 0.01;
           audio.setAttribute('playsinline', '');
-          await audio.play().catch(() => {}); // may need user gesture on first call
+          await audio.play().catch(() => {});
           keepaliveAudioRef.current = audio;
         } catch { /* keepalive is best-effort */ }
         if (cancelled) return;
 
-        // ── Media Session API: show "Voice Chat" on lock screen ──
+        // ── Media Session API ──
         if (navigator.mediaSession) {
           try {
             navigator.mediaSession.metadata = new MediaMetadata({
@@ -523,7 +616,7 @@ export default function useVoice(channelId) {
           } catch { /* best-effort */ }
         }
 
-        // ── Wake Lock API: prevent screen from auto-dimming ──
+        // ── Wake Lock API ──
         if (navigator.wakeLock) {
           try {
             wakeLockRef.current = await navigator.wakeLock.request('screen');
@@ -548,21 +641,18 @@ export default function useVoice(channelId) {
         }
         localStreamRef.current = stream;
 
-        // ── Capture AudioContext (force 48kHz — always hits RNNoise fast path) ──
+        // Apply initial mute state
+        const micTrack = stream.getAudioTracks()[0];
+        if (micTrack) {
+          micTrack.enabled = !isMutedRef.current;
+        }
+
+        // ── Local audio chain ──
+        // getUserMedia → AudioContext → AnalyserNode → GainNode (VAD gate) → MediaStreamDestination
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-        const nativeRate = audioCtx.sampleRate;
-        console.log('[Voice] AudioContext at', nativeRate, 'Hz');
+        console.log('[Voice] AudioContext at', audioCtx.sampleRate, 'Hz');
         audioContextRef.current = audioCtx;
 
-        // ── Load capture AudioWorklet ──
-        await audioCtx.audioWorklet.addModule('/capture-processor.js');
-        if (cancelled) return;
-
-        // ── Voice processing chain ──
-        // HP → subtle presence boost → capture. No DynamicsCompressor — it fights
-        // with browser's autoGainControl and causes crackling/pumping artifacts.
-        // Browser's getUserMedia provides echoCancellation + noiseSuppression + autoGainControl.
-        // RNNoise adds deep noise suppression on top.
         const micSource = audioCtx.createMediaStreamSource(stream);
 
         const highPass = audioCtx.createBiquadFilter();
@@ -570,7 +660,6 @@ export default function useVoice(channelId) {
         highPass.frequency.value = 80;
         highPass.Q.value = 0.707;
 
-        // Subtle presence boost — vocal clarity without harshness
         const presence = audioCtx.createBiquadFilter();
         presence.type = 'peaking';
         presence.frequency.value = 3000;
@@ -581,78 +670,22 @@ export default function useVoice(channelId) {
         analyser.fftSize = 1024;
         analyser.smoothingTimeConstant = 0.5;
 
-        const captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+        // VAD gate — GainNode that ramps between 0 (silence) and 1 (transmit)
+        const vadGain = audioCtx.createGain();
+        vadGain.gain.value = 0; // Start silent
+        vadGainRef.current = vadGain;
 
-        // Chain: mic → HP → presence → captureNode → analyser → silent output
+        // Output destination for WebRTC
+        const dest = audioCtx.createMediaStreamDestination();
+        const processedTrack = dest.stream.getAudioTracks()[0];
+        processedTrackRef.current = processedTrack;
+
+        // Chain: mic → HP → presence → analyser → vadGain → destination
         micSource.connect(highPass);
         highPass.connect(presence);
-        presence.connect(captureNode);
-        captureNode.connect(analyser);
-        const silentGain = audioCtx.createGain();
-        silentGain.gain.value = 0.00001;
-        analyser.connect(silentGain);
-        silentGain.connect(audioCtx.destination);
-
-        // ── Speech-weighted adaptive VAD ──
-        // Only looks at 300Hz–3kHz (speech formant range). Ignores:
-        //   - Low-freq rumble (chair, footsteps, HVAC)
-        //   - High-freq hiss (fans, electronics)
-        //   - Broadband transients outside speech band (keyboard clicks)
-        // Adaptive noise floor tracks ambient level during silence,
-        // so threshold auto-adjusts to the room.
-        const binWidth = nativeRate / analyser.fftSize;
-        const speechLowBin = Math.round(200 / binWidth);   // ~200Hz (captures male fundamentals)
-        const speechHighBin = Math.floor(3000 / binWidth);  // ~3kHz
-        const speechBinCount = speechHighBin - speechLowBin + 1;
-        let noiseFloor = 10;
-        let warmupFrames = 5; // First 500ms: minimum tracking to find ambient level
-        let warmupMin = Infinity;
-
-        const vadData = new Uint8Array(analyser.frequencyBinCount);
-        let micLevelCounter = 0; // throttle mic level UI updates
-
-        // ── Opus encoder (WebCodecs) ──
-        let useOpus = false;
-        let encoder = null;
-        let seqCounter = 0;
-
-        if (typeof AudioEncoder !== 'undefined') {
-          try {
-            const config = {
-              codec: 'opus',
-              sampleRate: 48000,
-              numberOfChannels: 1,
-              bitrate: 64000,
-            };
-            const support = await AudioEncoder.isConfigSupported(config);
-            if (support.supported) {
-              useOpus = true;
-              encoder = new AudioEncoder({
-                output: (chunk) => {
-                  if (cancelled) return;
-                  const buf = new ArrayBuffer(chunk.byteLength);
-                  chunk.copyTo(buf);
-                  socket.volatile.emit('audio:chunk', {
-                    channelId: channelIdRef.current,
-                    data: buf,
-                    codec: 'opus',
-                    seq: seqCounter++,
-                  });
-                },
-                error: (e) => {
-                  console.error('[Voice] Encoder error:', e);
-                  useOpus = false;
-                },
-              });
-              encoder.configure(config);
-              encoderRef.current = encoder;
-              console.log('[Voice] Opus encoder ready');
-            }
-          } catch (e) {
-            console.warn('[Voice] Opus not available, using PCM:', e.message);
-          }
-        }
-        if (cancelled) return;
+        presence.connect(analyser);
+        analyser.connect(vadGain);
+        vadGain.connect(dest);
 
         // ── Eagerly load RNNoise if previously enabled ──
         if (noiseSuppressionRef.current && !rnnoiseRef.current) {
@@ -664,27 +697,25 @@ export default function useVoice(channelId) {
           }).catch((e) => console.warn('[Voice] RNNoise load failed:', e));
         }
 
-        // ── Handle frames from capture worklet ──
-        let frameTimestamp = 0;
-        let gateWasOpen = false;
-        let fadeOutRemaining = 0;
-        let consecutiveSpeechFrames = 0; // transient rejection — require 2+ frames
-        const FADE_OUT_FRAMES = 3; // 3 × 20ms = 60ms fade-out
-        const FADE_IN_SAMPLES = Math.round(nativeRate * 0.008); // 8ms fade-in
+        // ── VAD polling ──
+        const vadData = new Uint8Array(analyser.frequencyBinCount);
+        const binWidth = audioCtx.sampleRate / analyser.fftSize;
+        const speechLowBin = Math.round(200 / binWidth);
+        const speechHighBin = Math.floor(3000 / binWidth);
+        const speechBinCount = speechHighBin - speechLowBin + 1;
+        let noiseFloor = 10;
+        let warmupFrames = 5;
+        let warmupMin = Infinity;
+        let consecutiveSpeechFrames = 0;
+        let micLevelCounter = 0;
 
-        captureNode.port.onmessage = (e) => {
-          if (isMutedRef.current || cancelled) return;
-          let { pcm } = e.data;
+        // For RNNoise VAD: process frames from analyser time domain data
+        const rnnoiseFrameSize = 480; // 10ms at 48kHz
+        const rnnoiseTimeBuf = new Float32Array(analyser.fftSize);
 
-          // Apply RNNoise denoising before VAD gate (cleaner input = better VAD)
-          if (noiseSuppressionRef.current && rnnoiseRef.current) {
-            const { pcm: denoised, vadProb } = denoiseFrame(rnnoiseRef.current, pcm, nativeRate);
-            pcm = denoised;
-            vadProbAccRef.current.sum += vadProb;
-            vadProbAccRef.current.count++;
-          }
+        const vadInterval = setInterval(() => {
+          if (cancelled) return;
 
-          // ── Inline VAD (every 20ms frame instead of 100ms polling) ──
           analyser.getByteFrequencyData(vadData);
 
           let speechEnergy = 0;
@@ -693,8 +724,8 @@ export default function useVoice(channelId) {
           }
           speechEnergy /= speechBinCount;
 
-          // Throttle mic level indicator (~100ms = every 5th frame)
-          if (++micLevelCounter >= 5) {
+          // Mic level indicator
+          if (++micLevelCounter >= 2) { // ~100ms at 50ms intervals
             micLevelCounter = 0;
             let fullEnergy = 0;
             for (let i = 0; i < vadData.length; i++) fullEnergy += vadData[i];
@@ -716,15 +747,28 @@ export default function useVoice(channelId) {
             noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
           }
 
-          // Determine speaking state (per-frame raw detection)
+          // RNNoise VAD probability (when available)
+          let rnnoiseVadProb = -1;
+          if (noiseSuppressionRef.current && rnnoiseRef.current) {
+            analyser.getFloatTimeDomainData(rnnoiseTimeBuf);
+            // Process available 480-sample chunks through RNNoise for VAD
+            const numChunks = Math.floor(rnnoiseTimeBuf.length / rnnoiseFrameSize);
+            if (numChunks > 0) {
+              let probSum = 0;
+              for (let c = 0; c < numChunks; c++) {
+                const chunk = rnnoiseTimeBuf.subarray(c * rnnoiseFrameSize, (c + 1) * rnnoiseFrameSize);
+                const { vadProb } = rnnoiseRef.current.processFrame(chunk);
+                probSum += vadProb;
+              }
+              rnnoiseVadProb = probSum / numChunks;
+            }
+          }
+
+          // Determine speaking state
           let speaking;
           if (sensitivityModeRef.current === 'auto') {
-            if (noiseSuppressionRef.current && rnnoiseRef.current) {
-              const acc = vadProbAccRef.current;
-              const avgVadProb = acc.count > 0 ? acc.sum / acc.count : 0;
-              acc.sum = 0;
-              acc.count = 0;
-              speaking = avgVadProb > 0.65; // stricter — rejects keyboard clicks, claps
+            if (rnnoiseVadProb >= 0) {
+              speaking = rnnoiseVadProb > 0.65;
             } else {
               speaking = speechEnergy > noiseFloor + 14;
             }
@@ -733,9 +777,7 @@ export default function useVoice(channelId) {
             speaking = speechEnergy > noiseFloor + margin;
           }
 
-          // Transient rejection: require 2+ consecutive speech frames before
-          // opening the gate. Single-frame events (keyboard clicks, claps)
-          // don't trigger transmission.
+          // Transient rejection
           if (speaking) {
             consecutiveSpeechFrames++;
           } else {
@@ -755,72 +797,58 @@ export default function useVoice(channelId) {
             });
           }
 
-          const gateOpen = performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS;
-          let frame;
+          // Gate control via GainNode ramp
+          const now = audioCtx.currentTime;
+          const gateOpen = isMutedRef.current ? false :
+            (performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS);
 
           if (gateOpen) {
-            if (!gateWasOpen) {
-              // Gate just opened — fade-in to avoid click
-              frame = new Float32Array(pcm.length);
-              for (let i = 0; i < pcm.length; i++) {
-                frame[i] = pcm[i] * (i < FADE_IN_SAMPLES ? i / FADE_IN_SAMPLES : 1);
-              }
-            } else {
-              frame = pcm;
-            }
-            gateWasOpen = true;
-            fadeOutRemaining = FADE_OUT_FRAMES;
-          } else if (fadeOutRemaining > 0) {
-            // Gate closed — smooth fade-out over remaining frames
-            frame = new Float32Array(pcm.length);
-            const startGain = fadeOutRemaining / (FADE_OUT_FRAMES + 1);
-            const endGain = (fadeOutRemaining - 1) / (FADE_OUT_FRAMES + 1);
-            for (let i = 0; i < pcm.length; i++) {
-              const t = i / pcm.length;
-              frame[i] = pcm[i] * (startGain + (endGain - startGain) * t);
-            }
-            fadeOutRemaining--;
-            if (fadeOutRemaining === 0) gateWasOpen = false;
+            vadGain.gain.linearRampToValueAtTime(1, now + 0.008); // 8ms fade-in
           } else {
-            gateWasOpen = false;
-            return;
+            vadGain.gain.linearRampToValueAtTime(0, now + 0.06); // 60ms fade-out
           }
+        }, VAD_POLL_MS);
 
-          // Check if all peers can decode Opus
-          let allPeersOpus = true;
-          for (const caps of peerCapsRef.current.values()) {
-            if (!caps.opus) { allPeersOpus = false; break; }
-          }
+        vadIntervalRef.current = vadInterval;
 
-          if (useOpus && encoder && encoder.state === 'configured' && allPeersOpus) {
-            try {
-              const audioData = new AudioData({
-                format: 'f32-planar',
-                sampleRate: nativeRate,
-                numberOfFrames: frame.length,
-                numberOfChannels: 1,
-                timestamp: frameTimestamp,
-                data: frame,
-              });
-              encoder.encode(audioData);
-              audioData.close();
-              frameTimestamp += 20000;
-            } catch (e) {
-              console.error('[Voice] Encode error:', e);
-            }
-          } else {
-            // PCM fallback
-            const int16 = new Int16Array(frame.length);
-            for (let i = 0; i < frame.length; i++) {
-              int16[i] = Math.max(-32768, Math.min(32767, (frame[i] * 32767) | 0));
-            }
-            socket.volatile.emit('audio:chunk', {
-              channelId: channelIdRef.current,
-              data: int16.buffer,
-              sampleRate: nativeRate,
+        if (cancelled) return;
+
+        // ── Remote speaking detection polling ──
+        const remoteSpeakingInterval = setInterval(() => {
+          if (cancelled) return;
+          for (const [peerId, nodes] of remoteAudioNodesRef.current) {
+            const data = new Uint8Array(nodes.analyser.frequencyBinCount);
+            nodes.analyser.getByteFrequencyData(data);
+            let energy = 0;
+            for (let i = 0; i < data.length; i++) energy += data[i];
+            const avg = energy / data.length;
+            const isSpeakingNow = avg > 15;
+            setSpeakingPeers((prev) => {
+              const has = prev.has(peerId);
+              if (isSpeakingNow === has) return prev;
+              const s = new Set(prev);
+              if (isSpeakingNow) s.add(peerId);
+              else s.delete(peerId);
+              return s;
             });
           }
+        }, 100);
+
+        // ── Create peer connections for existing peers ──
+        for (const peer of existingPeers) {
+          // We're the new joiner — existing peers will send offers to us
+          // We don't create offers ourselves (avoids glare)
+          console.log(`[Voice] Waiting for offer from existing peer ${peer.socketId}`);
+        }
+
+        // ── Cleanup additions ──
+        const originalCleanup = () => {
+          clearInterval(vadInterval);
+          clearInterval(remoteSpeakingInterval);
         };
+
+        // Store for cleanup
+        vadIntervalRef.current = { vadInterval, remoteSpeakingInterval, cleanup: originalCleanup };
       } catch (err) {
         console.error('[Voice] Init error:', err);
       }
@@ -828,17 +856,15 @@ export default function useVoice(channelId) {
 
     init();
 
-    // ── Visibility change: resume audio + re-acquire wake lock on return ──
+    // ── Visibility change ──
     function handleVisibilityChange() {
       if (document.visibilityState !== 'visible') return;
-      // Resume AudioContexts that may have been suspended while backgrounded
       if (audioContextRef.current?.state === 'suspended') {
         audioContextRef.current.resume().catch(() => {});
       }
       if (playbackCtxRef.current?.state === 'suspended') {
         playbackCtxRef.current.resume().catch(() => {});
       }
-      // Re-acquire wake lock (auto-released when page goes hidden)
       if (navigator.wakeLock && !wakeLockRef.current) {
         navigator.wakeLock.request('screen')
           .then((lock) => { wakeLockRef.current = lock; })
@@ -851,7 +877,9 @@ export default function useVoice(channelId) {
     return () => {
       cancelled = true;
 
-      socket.off('audio:chunk', handleAudioChunk);
+      socket.off('webrtc:offer', handleOffer);
+      socket.off('webrtc:answer', handleAnswer);
+      socket.off('webrtc:ice-candidate', handleIceCandidate);
       socket.off('voice:user-joined', handleUserJoined);
       socket.off('voice:user-left', handleUserLeft);
       socket.off('voice:speaking', handleSpeaking);
@@ -915,20 +943,40 @@ export default function useVoice(channelId) {
       playChime(playbackCtxRef, 'down');
       socket.emit('voice:leave', { channelId });
 
-      if (encoderRef.current) {
-        try { encoderRef.current.close(); } catch {}
-        encoderRef.current = null;
+      // ── Close all peer connections ──
+      for (const [, pc] of peerConnections) {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
       }
-      for (const decoder of decodersRef.current.values()) {
-        try { decoder.close(); } catch {}
-      }
-      decodersRef.current.clear();
+      peerConnections.clear();
 
-      if (playbackNodeRef.current) {
-        playbackNodeRef.current.port.postMessage({ clear: true });
-        playbackNodeRef.current.disconnect();
-        playbackNodeRef.current = null;
+      // ── Disconnect all remote audio nodes ──
+      for (const [, nodes] of remoteAudioNodes) {
+        try { nodes.source.disconnect(); } catch { /* ignore */ }
+        try { nodes.analyser.disconnect(); } catch { /* ignore */ }
+        try { nodes.panner.disconnect(); } catch { /* ignore */ }
       }
+      remoteAudioNodes.clear();
+      peerCounterRef.current = 0;
+
+      // ── Clear intervals ──
+      if (vadIntervalRef.current) {
+        if (vadIntervalRef.current.cleanup) {
+          vadIntervalRef.current.cleanup();
+        } else {
+          clearInterval(vadIntervalRef.current);
+        }
+        vadIntervalRef.current = null;
+      }
+
+      // ── Stop processed track ──
+      if (processedTrackRef.current) {
+        processedTrackRef.current.stop();
+        processedTrackRef.current = null;
+      }
+
       if (loopbackRef.current) {
         loopbackRef.current.disconnect();
         loopbackRef.current = null;
@@ -950,7 +998,7 @@ export default function useVoice(channelId) {
       }
       shareGainNodeRef.current = null;
       musicPlanarBufRef.current = null;
-      peerCapsRef.current.clear();
+      vadGainRef.current = null;
       wasSpeakingRef.current = false;
       lastSpeechTimeRef.current = 0;
       setSpeakingPeers(new Set());
@@ -1002,19 +1050,15 @@ export default function useVoice(channelId) {
         video: true,
       });
     } catch (err) {
-      // User cancelled the picker — silently return
       if (err.name === 'NotAllowedError') return;
       console.error('[Music] getDisplayMedia error:', err);
       return;
     }
 
-    // Extract tab title from video track label before discarding
     let shareTitle = '';
     const videoTracks = stream.getVideoTracks();
     if (videoTracks.length > 0) {
       const label = videoTracks[0].label || '';
-      // Chrome tab capture gives label like "Tab Title" or "Tab Title - Site"
-      // Filter out generic/useless labels and internal Chrome stream URLs
       const generic = /^(screen:|entire screen|window:|web-contents-media-stream:|:\/\/|$)/i;
       if (label && !generic.test(label)) {
         shareTitle = label;
@@ -1065,7 +1109,6 @@ export default function useVoice(channelId) {
       captureNode.connect(silentGain);
       silentGain.connect(musicCtx.destination);
 
-      // Create stereo Opus encoder at 96kbps
       let musicSeq = 0;
       const encoder = new AudioEncoder({
         output: (chunk) => {
@@ -1087,14 +1130,12 @@ export default function useVoice(channelId) {
       });
       musicEncoderRef.current = encoder;
 
-      // Handle frames from capture worklet
       let frameTimestamp = 0;
       captureNode.port.onmessage = (e) => {
         const { left, right } = e.data;
         if (!left || !right) return;
         if (!musicEncoderRef.current || musicEncoderRef.current.state !== 'configured') return;
         try {
-          // Reuse planar buffer across frames (AudioData constructor copies from it)
           const totalLen = left.length + right.length;
           let planarData = musicPlanarBufRef.current;
           if (!planarData || planarData.length !== totalLen) {
@@ -1121,10 +1162,8 @@ export default function useVoice(channelId) {
 
       musicStreamRef.current = stream;
 
-      // Tell server we're sharing
       socket.emit('music:start', { channelId: channelIdRef.current, title: shareTitle }, (response) => {
         if (!response?.success) {
-          // Failed — clean up
           alert(response?.error || 'Could not start sharing');
           encoder.close();
           musicCtx.close();
@@ -1139,7 +1178,6 @@ export default function useVoice(channelId) {
         setSharingUser({ socketId: socket.id, username: 'You', title: shareTitle });
       });
 
-      // Auto-stop when the browser's "Stop sharing" bar is clicked
       audioTracks[0].addEventListener('ended', () => {
         stopSharingRef.current?.();
       });
