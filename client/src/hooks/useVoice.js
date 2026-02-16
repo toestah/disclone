@@ -559,7 +559,8 @@ export default function useVoice(channelId) {
         if (cancelled) return;
 
         // ── Voice processing chain ──
-        // "FM Radio" broadcast chain: HP → presence boost → gentle compressor → capture.
+        // HP → subtle presence boost → capture. No DynamicsCompressor — it fights
+        // with browser's autoGainControl and causes crackling/pumping artifacts.
         // Browser's getUserMedia provides echoCancellation + noiseSuppression + autoGainControl.
         // RNNoise adds deep noise suppression on top.
         const micSource = audioCtx.createMediaStreamSource(stream);
@@ -569,21 +570,12 @@ export default function useVoice(channelId) {
         highPass.frequency.value = 80;
         highPass.Q.value = 0.707;
 
-        // Presence boost — 3kHz peak adds vocal clarity
+        // Subtle presence boost — vocal clarity without harshness
         const presence = audioCtx.createBiquadFilter();
         presence.type = 'peaking';
         presence.frequency.value = 3000;
-        presence.Q.value = 1.0;
-        presence.gain.value = 3;
-
-        // Gentle broadcast compressor — consistent levels without pumping.
-        // Soft knee + moderate ratio keeps speech natural while smoothing dynamics.
-        const compressor = audioCtx.createDynamicsCompressor();
-        compressor.threshold.value = -24;
-        compressor.knee.value = 12;
-        compressor.ratio.value = 3;
-        compressor.attack.value = 0.01;
-        compressor.release.value = 0.2;
+        presence.Q.value = 1.5;
+        presence.gain.value = 2;
 
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 1024;
@@ -591,11 +583,10 @@ export default function useVoice(channelId) {
 
         const captureNode = new AudioWorkletNode(audioCtx, 'capture-processor');
 
-        // Chain: mic → HP → presence → compressor → captureNode → analyser → silent output
+        // Chain: mic → HP → presence → captureNode → analyser → silent output
         micSource.connect(highPass);
         highPass.connect(presence);
-        presence.connect(compressor);
-        compressor.connect(captureNode);
+        presence.connect(captureNode);
         captureNode.connect(analyser);
         const silentGain = audioCtx.createGain();
         silentGain.gain.value = 0.00001;

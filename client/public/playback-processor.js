@@ -2,24 +2,22 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._peers = new Map();
-    this._basePrefillSamples = Math.round(sampleRate * 0.15); // 150ms base prefill
-    this._maxPrefillSamples = Math.round(sampleRate * 0.3);  // 300ms cap
-    this._prefillStep = Math.round(sampleRate * 0.02);        // 20ms increment per repeated underrun
+    this._basePrefillSamples = Math.round(sampleRate * 0.2);  // 200ms base prefill
+    this._maxPrefillSamples = Math.round(sampleRate * 0.35);  // 350ms cap
+    this._prefillStep = Math.round(sampleRate * 0.04);         // 40ms increment per repeated underrun
     this._fadeInLength = Math.round(sampleRate * 0.005);       // 5ms fade-in
     this._decay = Math.exp(-1 / (sampleRate * 0.003));         // 3ms exponential decay
     this._frameSamples = Math.round(sampleRate * 0.02);        // 20ms frame for PLC
-    this._maxPlcRepeats = 6;                                   // Up to 6 PLC frames (120ms)
+    this._maxPlcRepeats = 3;                                   // Up to 3 PLC frames (60ms) — short, clean fade
     this._plcFadeInLength = Math.round(sampleRate * 0.003);    // 3ms fade-in on PLC frames
     this._peerCounter = 0;                                     // for pan position assignment
-    this._comfortNoiseLevel = Math.pow(10, -45 / 20);           // -45 dBFS
-    this._comfortNoiseFadeLen = Math.round(sampleRate * 0.05);  // 50ms fade in/out
 
     // PLC lowpass coefficients — progressively filter repeated frames
     // so they sound like natural trail-off instead of robotic repetition.
-    // Cutoff halves each frame: 6kHz → 3kHz → 1.5kHz → 750Hz → ...
+    // Starts at 4kHz (already muffled) and halves each frame.
     this._plcLpCoeffs = [];
     for (let i = 0; i < this._maxPlcRepeats; i++) {
-      const fc = 6000 / Math.pow(2, i);
+      const fc = 4000 / Math.pow(2, i);
       this._plcLpCoeffs.push(1 - Math.exp(-2 * Math.PI * fc / sampleRate));
     }
 
@@ -76,9 +74,6 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             // Stereo panning (equal-power)
             panLeft: Math.cos(angle + Math.PI / 4),
             panRight: Math.sin(angle + Math.PI / 4),
-            // Comfort noise
-            cnFade: 0,             // current fade position (0 = silent, fadeLen = full)
-            cnActive: false,       // whether comfort noise is active
           };
           this._peers.set(peerId, peer);
         }
@@ -88,7 +83,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           peer.draining = false;
           if (!peer.started) {
             peer.started = true;
-            peer.fadeIn = this._fadeInLength; // 3ms fade-in on resume
+            peer.fadeIn = this._fadeInLength; // 5ms fade-in on resume
           }
         }
 
@@ -120,7 +115,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
 
   /**
    * Adapt prefill size based on underrun frequency.
-   * If multiple underruns within 5 seconds, increase prefill by 20ms steps (cap 150ms).
+   * If multiple underruns within 5 seconds, increase prefill by 40ms steps.
    */
   _adaptPrefill(peer, now) {
     peer.underrunHistory.push(now);
@@ -177,12 +172,6 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             peer.plcFadeIn--;
           }
 
-          // Fade out comfort noise when real data resumes
-          if (peer.cnActive) {
-            peer.cnFade = Math.max(0, peer.cnFade - 1);
-            if (peer.cnFade === 0) peer.cnActive = false;
-          }
-
           // Stereo panning
           left[i] += sample * peer.panLeft;
           right[i] += sample * peer.panRight;
@@ -191,8 +180,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         } else {
           // Underrun — generate PLC inline so it plays THIS quantum, not next
           if (peer.lastFrameLen > 0 && peer.plcCount < this._maxPlcRepeats) {
-            // Exponential gain decay + progressive lowpass → natural trail-off
-            const gain = Math.pow(0.75, peer.plcCount + 1);
+            // Steep exponential decay + aggressive lowpass → fast, clean trail-off
+            const gain = Math.pow(0.55, peer.plcCount + 1);
             const alpha = this._plcLpCoeffs[peer.plcCount];
             let lpState = peer.plcLpState;
             for (let j = 0; j < peer.lastFrameLen; j++) {
@@ -215,18 +204,8 @@ class PlaybackProcessor extends AudioWorkletProcessor {
             peer.lastSample *= this._decay;
             left[i] += peer.lastSample * peer.panLeft;
             right[i] += peer.lastSample * peer.panRight;
-          } else if (peer.started && !peer.draining) {
-            // Comfort noise: low-level shaped noise so channel feels "alive"
-            peer.cnActive = true;
-            peer.cnFade = Math.min(peer.cnFade + 1, this._comfortNoiseFadeLen);
-            const gain = this._comfortNoiseLevel * (peer.cnFade / this._comfortNoiseFadeLen);
-            // Simple pink-ish noise: average 2 white samples for -3dB/octave rolloff
-            const w1 = Math.random() * 2 - 1;
-            const w2 = Math.random() * 2 - 1;
-            const noise = (w1 + w2) * 0.5 * gain;
-            left[i] += noise * peer.panLeft;
-            right[i] += noise * peer.panRight;
           }
+          // No comfort noise — clean silence between speech segments
         }
       }
 
