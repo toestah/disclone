@@ -26,6 +26,24 @@ app.use(express.static(clientDist, {
   },
 }));
 
+// ── ICE servers endpoint (STUN + optional TURN) ─────────────────
+// Configure TURN via env vars: TURN_URLS, TURN_USERNAME, TURN_CREDENTIAL
+app.get('/api/ice-servers', (req, res) => {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ];
+  if (process.env.TURN_URLS) {
+    const urls = process.env.TURN_URLS.split(',').map(u => u.trim());
+    iceServers.push({
+      urls,
+      username: process.env.TURN_USERNAME || '',
+      credential: process.env.TURN_CREDENTIAL || '',
+    });
+  }
+  res.json(iceServers);
+});
+
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {

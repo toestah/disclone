@@ -41,7 +41,6 @@ function playChime(ctxRef, direction) {
 
 // ── Constants ───────────────────────────────────────────────────
 
-const GATE_HOLD_MS = 250;
 const MIN_NOISE_FLOOR = 3;
 const VAD_POLL_MS = 50;
 
@@ -182,6 +181,7 @@ export default function useVoice(channelId) {
   const vadGainRef = useRef(null);
   const vadIntervalRef = useRef(null);
   const peerCounterRef = useRef(0);
+  const denoiseNodeRef = useRef(null);
 
   // Music refs (unchanged)
   const musicStreamRef = useRef(null);
@@ -230,22 +230,33 @@ export default function useVoice(channelId) {
     if (track) {
       try { await track.applyConstraints({ noiseSuppression: enabled }); } catch { /* ignore */ }
     }
-    if (enabled && !rnnoiseRef.current) {
-      try {
-        const module = await loadRnnoise();
-        rnnoiseRef.current = new RnnoiseDenoiser(module);
-        console.log('[Voice] RNNoise denoiser loaded');
-      } catch (e) {
-        console.error('[Voice] Failed to load RNNoise:', e);
-        setNoiseSuppressionState(false);
-        localStorage.setItem('disclone_noise_suppression', 'false');
+    if (enabled) {
+      // Load RNNoise first, THEN enable the denoise worklet
+      if (!rnnoiseRef.current) {
+        try {
+          const module = await loadRnnoise();
+          rnnoiseRef.current = new RnnoiseDenoiser(module);
+          console.log('[Voice] RNNoise denoiser loaded');
+        } catch (e) {
+          console.error('[Voice] Failed to load RNNoise:', e);
+          setNoiseSuppressionState(false);
+          localStorage.setItem('disclone_noise_suppression', 'false');
+          return;
+        }
       }
-    } else if (!enabled) {
+      if (denoiseNodeRef.current) {
+        denoiseNodeRef.current.port.postMessage({ enabled: true });
+      }
+    } else {
+      // Disable worklet first (instant bypass), then cleanup RNNoise
+      if (denoiseNodeRef.current) {
+        denoiseNodeRef.current.port.postMessage({ enabled: false });
+      }
       if (rnnoiseRef.current) {
         rnnoiseRef.current.destroy();
         rnnoiseRef.current = null;
       }
-      console.log('[Voice] RNNoise denoiser destroyed');
+      console.log('[Voice] RNNoise denoiser disabled');
     }
   }, []);
 
@@ -254,6 +265,7 @@ export default function useVoice(channelId) {
     let cancelled = false;
     let audioReady = false; // true once processedTrack + masterCompressor exist
     const pendingSignals = []; // queued signaling messages before audio is ready
+    let iceConfig = ICE_CONFIG; // updated in init() with TURN servers from /api/ice-servers
 
     // Capture ref values for cleanup (avoids react-hooks/exhaustive-deps warnings)
     const peerConnections = peerConnectionsRef.current;
@@ -366,7 +378,7 @@ export default function useVoice(channelId) {
         closePeerConnection(peerId);
       }
 
-      const pc = new RTCPeerConnection(ICE_CONFIG);
+      const pc = new RTCPeerConnection(iceConfig);
       peerConnectionsRef.current.set(peerId, pc);
       console.log(`[Voice] Creating PC for ${peerId} (offerer=${isOfferer})`);
 
@@ -612,6 +624,22 @@ export default function useVoice(channelId) {
     // ── Init ──
 
     async function init() {
+      // Fetch ICE servers (includes TURN if configured on server)
+      try {
+        const resp = await fetch('/api/ice-servers');
+        if (resp.ok) {
+          const servers = await resp.json();
+          if (servers.length > 0) {
+            iceConfig = { iceServers: servers };
+            const hasTurn = servers.some(s => (Array.isArray(s.urls) ? s.urls : [s.urls]).some(u => u.startsWith('turn')));
+            console.log(`[Voice] ICE servers: ${servers.length} (TURN: ${hasTurn ? 'yes' : 'no'})`);
+          }
+        }
+      } catch (e) {
+        console.warn('[Voice] TURN fetch failed, using STUN-only:', e);
+      }
+      if (cancelled) return;
+
       // Join the voice room on the server
       console.log('[Voice] Joining', channelId);
       const joinResponse = await new Promise((resolve) => {
@@ -692,7 +720,7 @@ export default function useVoice(channelId) {
         }
 
         // ── Local audio chain ──
-        // getUserMedia → AudioContext → AnalyserNode → GainNode (VAD gate) → MediaStreamDestination
+        // mic → HP → presence → denoiseNode → analyser → vadGain → dest → WebRTC
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
         console.log('[Voice] AudioContext at', audioCtx.sampleRate, 'Hz');
         audioContextRef.current = audioCtx;
@@ -710,13 +738,41 @@ export default function useVoice(channelId) {
         presence.Q.value = 1.5;
         presence.gain.value = 2;
 
+        // ── RNNoise denoise worklet ──
+        // Processes audio through RNNoise WASM to remove background noise
+        // (keyboard clicks, fan, etc.) from the signal itself — not just gating.
+        await audioCtx.audioWorklet.addModule('/denoise-processor.js');
+        const denoiseNode = new AudioWorkletNode(audioCtx, 'denoise-processor');
+        denoiseNodeRef.current = denoiseNode;
+        if (cancelled) return;
+
+        // RNNoise processing on main thread (worklet posts 480-sample frames here)
+        let latestRnnoiseVadProb = -1;
+        denoiseNode.port.onmessage = (e) => {
+          if (e.data.frame) {
+            if (rnnoiseRef.current) {
+              const { output, vadProb } = rnnoiseRef.current.processFrame(e.data.frame);
+              latestRnnoiseVadProb = vadProb;
+              const denoised = new Float32Array(480);
+              denoised.set(output);
+              denoiseNode.port.postMessage({ denoised }, [denoised.buffer]);
+            } else {
+              // RNNoise not loaded — pass frame back unchanged
+              latestRnnoiseVadProb = -1;
+              denoiseNode.port.postMessage({ denoised: e.data.frame }, [e.data.frame.buffer]);
+            }
+          }
+        };
+
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 1024;
         analyser.smoothingTimeConstant = 0.5;
 
-        // VAD gate — GainNode that ramps between 0 (silence) and 1 (transmit)
+        // GainNode kept in chain for mute (always 1 — VAD no longer gates audio).
+        // RNNoise denoises the signal; Opus DTX handles silence efficiently.
+        // VAD is only used for the speaking indicator UI now.
         const vadGain = audioCtx.createGain();
-        vadGain.gain.value = 0; // Start silent
+        vadGain.gain.value = 1;
         vadGainRef.current = vadGain;
 
         // Output destination for WebRTC
@@ -724,10 +780,11 @@ export default function useVoice(channelId) {
         const processedTrack = dest.stream.getAudioTracks()[0];
         processedTrackRef.current = processedTrack;
 
-        // Chain: mic → HP → presence → analyser → vadGain → destination
+        // Chain: mic → HP → presence → denoiseNode → analyser → vadGain → dest
         micSource.connect(highPass);
         highPass.connect(presence);
-        presence.connect(analyser);
+        presence.connect(denoiseNode);
+        denoiseNode.connect(analyser);
         analyser.connect(vadGain);
         vadGain.connect(dest);
 
@@ -741,6 +798,10 @@ export default function useVoice(channelId) {
             if (!cancelled && !rnnoiseRef.current) {
               rnnoiseRef.current = new RnnoiseDenoiser(module);
               console.log('[Voice] RNNoise denoiser loaded (restored from settings)');
+              // Enable the worklet now that RNNoise is ready
+              if (denoiseNodeRef.current) {
+                denoiseNodeRef.current.port.postMessage({ enabled: true });
+              }
             }
           }).catch((e) => console.warn('[Voice] RNNoise load failed:', e));
         }
@@ -756,10 +817,6 @@ export default function useVoice(channelId) {
         let warmupMin = Infinity;
         let consecutiveSpeechFrames = 0;
         let micLevelCounter = 0;
-
-        // For RNNoise VAD: process frames from analyser time domain data
-        const rnnoiseFrameSize = 480; // 10ms at 48kHz
-        const rnnoiseTimeBuf = new Float32Array(analyser.fftSize);
 
         const vadInterval = setInterval(() => {
           if (cancelled) return;
@@ -795,22 +852,8 @@ export default function useVoice(channelId) {
             noiseFloor = Math.max(MIN_NOISE_FLOOR, noiseFloor);
           }
 
-          // RNNoise VAD probability (when available)
-          let rnnoiseVadProb = -1;
-          if (noiseSuppressionRef.current && rnnoiseRef.current) {
-            analyser.getFloatTimeDomainData(rnnoiseTimeBuf);
-            // Process available 480-sample chunks through RNNoise for VAD
-            const numChunks = Math.floor(rnnoiseTimeBuf.length / rnnoiseFrameSize);
-            if (numChunks > 0) {
-              let probSum = 0;
-              for (let c = 0; c < numChunks; c++) {
-                const chunk = rnnoiseTimeBuf.subarray(c * rnnoiseFrameSize, (c + 1) * rnnoiseFrameSize);
-                const { vadProb } = rnnoiseRef.current.processFrame(chunk);
-                probSum += vadProb;
-              }
-              rnnoiseVadProb = probSum / numChunks;
-            }
-          }
+          // RNNoise VAD probability (from denoise worklet chain — updated continuously)
+          const rnnoiseVadProb = latestRnnoiseVadProb;
 
           // Determine speaking state
           let speaking;
@@ -845,16 +888,6 @@ export default function useVoice(channelId) {
             });
           }
 
-          // Gate control via GainNode ramp
-          const now = audioCtx.currentTime;
-          const gateOpen = isMutedRef.current ? false :
-            (performance.now() - lastSpeechTimeRef.current <= GATE_HOLD_MS);
-
-          if (gateOpen) {
-            vadGain.gain.linearRampToValueAtTime(1, now + 0.008); // 8ms fade-in
-          } else {
-            vadGain.gain.linearRampToValueAtTime(0, now + 0.06); // 60ms fade-out
-          }
         }, VAD_POLL_MS);
 
         vadIntervalRef.current = vadInterval;
@@ -1029,6 +1062,11 @@ export default function useVoice(channelId) {
         processedTrackRef.current = null;
       }
 
+      if (denoiseNodeRef.current) {
+        denoiseNodeRef.current.port.close();
+        denoiseNodeRef.current.disconnect();
+        denoiseNodeRef.current = null;
+      }
       if (loopbackRef.current) {
         loopbackRef.current.disconnect();
         loopbackRef.current = null;
