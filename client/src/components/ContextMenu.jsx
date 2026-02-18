@@ -29,7 +29,7 @@ export default function ContextMenu({ x, y, items, onClose }) {
   };
 
   return (
-    <div ref={ref} style={style} className="bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 w-48">
+    <div ref={ref} style={style} className="bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 w-48 context-enter">
       {items.map((item, i) => (
         <button
           key={i}

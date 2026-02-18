@@ -25,7 +25,7 @@ export default function LoginScreen({ onLogin, connected, error }) {
 
   return (
     <div className="flex items-center justify-center h-screen w-screen bg-discord-dark">
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(88,101,242,0.15),transparent_50%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(88,101,242,0.15),transparent_50%)] login-breathe" />
       <form
         onSubmit={handleSubmit}
         className="relative bg-discord-chat p-8 rounded-2xl shadow-2xl w-full max-w-md border border-white/[0.06]"

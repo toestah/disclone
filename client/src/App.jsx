@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { SocketProvider, useSocket } from './hooks/useSocket.jsx';
 import useVoice from './hooks/useVoice.js';
+import useSounds from './hooks/useSounds.js';
 import LoginScreen from './components/LoginScreen.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import TextChannel from './components/TextChannel.jsx';
@@ -11,6 +12,7 @@ import MobileProfileView from './components/MobileProfileView.jsx';
 
 function AppContent() {
   const { socket, connected } = useSocket();
+  const sounds = useSounds();
   const [user, setUser] = useState(null);
   const [loginError, setLoginError] = useState('');
   const [channels, setChannels] = useState([]);
@@ -121,6 +123,21 @@ function AppContent() {
       });
     };
 
+    const handleReaction = ({ channelId, messageId, reactions }) => {
+      setMessages((prev) => {
+        const next = new Map(prev);
+        const msgs = next.get(channelId);
+        if (!msgs) return prev;
+        next.set(
+          channelId,
+          msgs.map((m) =>
+            m.id === messageId ? { ...m, reactions: Object.keys(reactions).length > 0 ? reactions : undefined } : m
+          )
+        );
+        return next;
+      });
+    };
+
     const handleDMOpened = (dmChannel) => {
       setDmChannels((prev) => {
         if (prev.some((d) => d.id === dmChannel.id)) return prev;
@@ -130,6 +147,7 @@ function AppContent() {
 
     socket.on('users:update', handleUsersUpdate);
     socket.on('message:new', handleNewMessage);
+    socket.on('message:reaction', handleReaction);
     socket.on('voice:room-update', handleVoiceRoomUpdate);
     socket.on('dm:new', handleDMNew);
     socket.on('dm:opened', handleDMOpened);
@@ -137,6 +155,7 @@ function AppContent() {
     return () => {
       socket.off('users:update', handleUsersUpdate);
       socket.off('message:new', handleNewMessage);
+      socket.off('message:reaction', handleReaction);
       socket.off('voice:room-update', handleVoiceRoomUpdate);
       socket.off('dm:new', handleDMNew);
       socket.off('dm:opened', handleDMOpened);
@@ -213,8 +232,9 @@ function AppContent() {
     (content, attachments) => {
       if (!socket) return;
       socket.emit('message:send', { channelId: activeChannel, content, attachments });
+      sounds.play('messageSend');
     },
-    [socket, activeChannel]
+    [socket, activeChannel, sounds]
   );
 
   // ── DM Handlers ──
@@ -266,8 +286,17 @@ function AppContent() {
     (content, attachments) => {
       if (!socket || !activeDM) return;
       socket.emit('dm:send', { dmChannelId: activeDM, content, attachments });
+      sounds.play('messageSend');
     },
-    [socket, activeDM]
+    [socket, activeDM, sounds]
+  );
+
+  const handleReact = useCallback(
+    (channelId, messageId, emoji) => {
+      if (!socket) return;
+      socket.emit('message:react', { channelId, messageId, emoji });
+    },
+    [socket]
   );
 
   const handleLogout = useCallback(() => {
@@ -298,7 +327,7 @@ function AppContent() {
     }
   }, [socket]);
 
-  const voiceState = useVoice(voiceChannel);
+  const voiceState = useVoice(voiceChannel, sounds.play);
 
   // Auto-reset: if voice disconnects while on voice tab, switch to chat
   const effectiveMobileTab = (!voiceChannel && mobileTab === 'voice') ? 'chat' : mobileTab;
@@ -340,10 +369,11 @@ function AppContent() {
     onLogout: handleLogout,
     voiceState,
     voiceChannel,
+    sounds,
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
+    <div className="flex h-screen w-screen overflow-clip noise-texture">
       {/* Sidebar — desktop: fixed 240px column, mobile: full-screen when channels tab */}
       <div className={`max-sm:fixed max-sm:inset-0 max-sm:z-40 sm:w-60 sm:flex-shrink-0 ${effectiveMobileTab === 'channels' ? 'max-sm:block' : 'max-sm:hidden'}`}>
         <Sidebar
@@ -364,21 +394,27 @@ function AppContent() {
       </div>
 
       {/* Main chat — desktop: flex column, mobile: full-screen when chat tab */}
-      <main className={`flex-1 flex flex-col bg-discord-chat min-w-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 ${effectiveMobileTab === 'chat' ? 'max-sm:block' : 'max-sm:hidden'}`}>
+      <main className={`flex-1 flex flex-col bg-discord-chat min-w-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 ambient-bg ambient-bg-chat ${effectiveMobileTab !== 'chat' ? 'max-sm:hidden' : ''}`}>
         {activeDM && activeDMInfo ? (
           <TextChannel
+            key={activeDM}
             channel={{ id: activeDM, name: activeDMInfo.username }}
             messages={messages.get(activeDM) || []}
             onSendMessage={handleSendDM}
+            onReact={handleReact}
+            currentUser={user.username}
             isDM
             dmTarget={activeDMInfo.username}
           />
         ) : (
           currentChannel?.type === 'text' && (
             <TextChannel
+              key={activeChannel}
               channel={currentChannel}
               messages={messages.get(activeChannel) || []}
               onSendMessage={handleSendMessage}
+              onReact={handleReact}
+              currentUser={user.username}
             />
           )
         )}
@@ -393,6 +429,7 @@ function AppContent() {
             voiceMembers={voiceMembers}
             voiceState={voiceState}
             user={user}
+            onVoiceLeave={handleVoiceLeave}
           />
         </div>
       )}
@@ -406,11 +443,12 @@ function AppContent() {
           onLogout={handleLogout}
           voiceState={voiceState}
           voiceChannel={voiceChannel}
+          sounds={sounds}
         />
       </div>
 
       {/* MemberList — desktop: side column (hidden <lg), mobile: full-screen when members tab */}
-      <div className={`flex-shrink-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 sm:hidden lg:block ${effectiveMobileTab === 'members' ? 'max-sm:block' : 'max-sm:hidden'}`}>
+      <div className={`flex-shrink-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 sm:w-32 lg:w-60 sm:transition-[width] sm:duration-300 sm:ease-in-out ambient-bg${voiceChannel ? ' ambient-bg-members-voice' : ' ambient-bg-members'} ${effectiveMobileTab !== 'members' ? 'max-sm:hidden' : ''}`}>
         <MemberList
           users={onlineUsers}
           currentUser={user.username}

@@ -2,43 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSocket } from './useSocket.jsx';
 import { loadRnnoise, RnnoiseDenoiser } from '../lib/rnnoise.js';
 
-// ── Audio chimes ────────────────────────────────────────────────
-
-function playChime(ctxRef, direction) {
-  let ctx = ctxRef.current;
-  if (!ctx || ctx.state === 'closed') {
-    try {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-      ctxRef.current = ctx;
-    } catch {
-      return;
-    }
-  }
-  const resumeP = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
-  resumeP.then(() => {
-    const now = ctx.currentTime + 0.05;
-    const vol = 0.18;
-    const dur = 0.1;
-    const gap = 0.04;
-    const freqs = direction === 'up' ? [523.25, 659.25] : [659.25, 523.25];
-    freqs.forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      const start = now + i * (dur + gap);
-      gain.gain.setValueAtTime(0, start);
-      gain.gain.linearRampToValueAtTime(vol, start + 0.015);
-      gain.gain.setValueAtTime(vol, start + dur - 0.02);
-      gain.gain.linearRampToValueAtTime(0, start + dur);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(start);
-      osc.stop(start + dur + 0.02);
-    });
-  });
-}
-
 // ── Constants ───────────────────────────────────────────────────
 
 const MIN_NOISE_FLOOR = 3;
@@ -132,7 +95,7 @@ function mungeOpusSDP(sdp) {
 
 // ── Hook ────────────────────────────────────────────────────────
 
-export default function useVoice(channelId) {
+export default function useVoice(channelId, playSound) {
   const { socket } = useSocket();
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -283,13 +246,13 @@ export default function useVoice(channelId) {
       console.error('[Voice] Playback AudioContext error:', e);
     }
 
-    playChime(playbackCtxRef, 'up');
+    playSound?.('voiceJoin');
 
     // ── Socket event handlers ──
 
     function handleUserJoined({ socketId }) {
       console.log(`[Voice] → user-joined: ${socketId}`);
-      playChime(playbackCtxRef, 'up');
+      playSound?.('userJoin');
       // Existing peer creates offer to new joiner (only if our audio is ready)
       if (audioReady && processedTrackRef.current) {
         createPeerConnection(socketId, true);
@@ -301,7 +264,7 @@ export default function useVoice(channelId) {
 
     function handleUserLeft({ socketId }) {
       console.log(`[Voice] → user-left: ${socketId}`);
-      playChime(playbackCtxRef, 'down');
+      playSound?.('userLeave');
       closePeerConnection(socketId);
       setSpeakingPeers((prev) => {
         const s = new Set(prev);
@@ -1021,7 +984,7 @@ export default function useVoice(channelId) {
         } catch { /* ignore */ }
       }
 
-      playChime(playbackCtxRef, 'down');
+      playSound?.('disconnect');
       socket.emit('voice:leave', { channelId });
 
       // ── Close all peer connections ──
@@ -1094,6 +1057,7 @@ export default function useVoice(channelId) {
       setSpeakingPeers(new Set());
       setPeerStates(new Map());
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelId, socket]);
 
   const toggleMute = useCallback(() => {
@@ -1103,6 +1067,7 @@ export default function useVoice(channelId) {
         track.enabled = !track.enabled;
         const muted = !track.enabled;
         setIsMuted(muted);
+        playSound?.(muted ? 'mute' : 'unmute');
         if (socket) {
           socket.emit('voice:muted', {
             channelId: channelIdRef.current,
@@ -1111,7 +1076,7 @@ export default function useVoice(channelId) {
         }
       }
     }
-  }, [socket]);
+  }, [socket, playSound]);
 
   const toggleTest = useCallback(() => {
     if (!audioContextRef.current || !localStreamRef.current) return;

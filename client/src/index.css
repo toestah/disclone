@@ -20,6 +20,13 @@
 /* Tailwind's Preflight (in @layer base) already resets margin/padding/box-sizing.
    Do NOT add an unlayered * reset — it overrides all Tailwind utility classes. */
 
+/* Tailwind v4 removed cursor:pointer from buttons — restore it for all interactive elements */
+@layer base {
+  button:not(:disabled), [role="button"], a, select, summary {
+    cursor: pointer;
+  }
+}
+
 body {
   font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -48,10 +55,6 @@ body {
 }
 .jukebox-title-scroll {
   animation: marquee-scroll 8s ease-in-out infinite alternate;
-}
-.jukebox-canvas {
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
 }
 .jukebox-title-mask {
   mask-image: linear-gradient(to right, transparent, black 8px, black calc(100% - 8px), transparent);
@@ -122,3 +125,82 @@ body {
 ::selection {
   background-color: rgba(88, 101, 242, 0.3);
 }
+
+/* ── Ambient Life ─────────────────────────────────────────────── */
+
+@keyframes ambient-glow {
+  0%, 100% { opacity: 0.35; transform: translate(-10%, -10%) scale(1); }
+  33%      { opacity: 0.55; transform: translate(10%, 5%) scale(1.1); }
+  66%      { opacity: 0.4;  transform: translate(-5%, 10%) scale(0.95); }
+}
+
+@layer base {
+  .ambient-bg { position: relative; }
+  .ambient-bg::before {
+    content: ''; position: absolute; inset: -50%; width: 200%; height: 200%;
+    background: radial-gradient(ellipse at center, rgba(88,101,242,0.35), rgba(35,165,90,0.15) 40%, transparent 70%);
+    animation: ambient-glow 20s ease-in-out infinite;
+    pointer-events: none; z-index: 0;
+  }
+  .ambient-bg > * { position: relative; z-index: 1; }
+
+  .ambient-bg-voice::before {
+    background: radial-gradient(ellipse at center, rgba(35,165,90,0.3), rgba(88,101,242,0.12) 40%, transparent 70%);
+  }
+  .ambient-bg-chat::before {
+    background: radial-gradient(ellipse at center, rgba(88,101,242,0.12), rgba(114,137,218,0.06) 40%, transparent 65%);
+    animation-direction: reverse;
+  }
+  .ambient-bg-members::before {
+    background: radial-gradient(ellipse at center, rgba(114,137,218,0.3), rgba(88,101,242,0.15) 40%, transparent 70%);
+    animation-delay: -7s;
+  }
+  .ambient-bg-members-voice::before {
+    background: radial-gradient(ellipse at center, rgba(35,165,90,0.25), rgba(114,137,218,0.15) 40%, transparent 70%);
+    animation-delay: -7s;
+  }
+}
+
+/* Login breathing */
+@keyframes login-breathe {
+  0%, 100% { opacity: 0.8; transform: scale(1); }
+  50%      { opacity: 1; transform: scale(1.02); }
+}
+@layer base {
+  .login-breathe {
+    animation: login-breathe 6s ease-in-out infinite;
+  }
+
+  /* Noise texture overlay */
+  .noise-texture { position: relative; }
+  .noise-texture::after {
+    content: ''; position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    opacity: 0.015;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+    z-index: 9999;
+  }
+}
+
+/* ── Smooth Transitions ───────────────────────────────────────── */
+
+/* Channel crossfade */
+@keyframes channel-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.channel-transition { animation: channel-fade-in 150ms ease-out; }
+
+/* Message arrival */
+@keyframes message-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.message-appear { animation: message-appear 200ms ease-out both; }
+
+/* Voice member enter */
+@keyframes voice-member-join { from { opacity: 0; transform: scale(0.8); } to { opacity: 1; transform: scale(1); } }
+.voice-member-enter { animation: voice-member-join 250ms ease-out both; }
+
+/* Popover entrance */
+@keyframes popover-in { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.popover-enter { animation: popover-in 150ms ease-out both; }
+
+/* Context menu entrance */
+@keyframes context-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+.context-enter { animation: context-in 120ms ease-out both; }

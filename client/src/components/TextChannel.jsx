@@ -124,11 +124,64 @@ function MessageAttachments({ attachments }) {
   );
 }
 
-export default function TextChannel({ channel, messages, onSendMessage, isDM, dmTarget }) {
+const REACTION_EMOJI = ['👍', '👎', '😂', '❤️', '🔥', '💯'];
+
+function ReactionPicker({ onSelect }) {
+  return (
+    <div className="flex items-center bg-discord-sidebar border border-white/10 rounded-md shadow-lg">
+      {REACTION_EMOJI.map((emoji) => (
+        <button
+          key={emoji}
+          onClick={(e) => { e.stopPropagation(); onSelect(emoji); }}
+          className="w-8 h-8 flex items-center justify-center hover:bg-white/10 text-base transition-colors first:rounded-l-md last:rounded-r-md"
+        >
+          {emoji}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ReactionPills({ reactions, currentUser, onToggle }) {
+  if (!reactions || Object.keys(reactions).length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1 mt-1">
+      {Object.entries(reactions).map(([emoji, users]) => {
+        const reacted = users.includes(currentUser);
+        return (
+          <button
+            key={emoji}
+            onClick={(e) => { e.stopPropagation(); onToggle(emoji); }}
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs border transition-colors ${
+              reacted
+                ? 'bg-discord-accent/20 border-discord-accent/50 text-discord-accent'
+                : 'bg-white/5 border-white/10 text-discord-muted hover:border-white/20'
+            }`}
+          >
+            <span className="text-sm leading-none">{emoji}</span>
+            <span>{users.length}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export default function TextChannel({ channel, messages, onSendMessage, onReact, currentUser, isDM, dmTarget }) {
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState([]);
+  const [hoveredMsgId, setHoveredMsgId] = useState(null);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const seenIdsRef = useRef(new Set());
+
+  // On mount (channel switch via key=), snapshot current message IDs so history doesn't animate
+  useEffect(() => {
+    const ids = new Set();
+    for (const msg of messages) ids.add(msg.id);
+    seenIdsRef.current = ids;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -188,7 +241,7 @@ export default function TextChannel({ channel, messages, onSendMessage, isDM, dm
   const placeholder = isDM ? `Message @${dmTarget}` : `Message #${channel.name}`;
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
+    <div className="flex flex-col flex-1 min-h-0 channel-transition">
       {/* Channel header */}
       <div className="h-12 px-4 flex items-center shadow-[0_1px_0_rgba(0,0,0,0.2),0_1px_2px_rgba(0,0,0,0.1)] border-b border-black/30 flex-shrink-0 z-10 gap-2">
         <span className="text-discord-muted text-lg font-light">{headerIcon}</span>
@@ -226,18 +279,31 @@ export default function TextChannel({ channel, messages, onSendMessage, isDM, dm
             prevMsg &&
             prevMsg.username === msg.username &&
             msg.timestamp - prevMsg.timestamp < 300000;
+          const isNew = !seenIdsRef.current.has(msg.id);
+          if (isNew) seenIdsRef.current.add(msg.id);
+          const animClass = isNew ? ' message-appear' : '';
+
+          const reactTo = (emoji) => onReact?.(channel.id, msg.id, emoji);
 
           if (isGrouped) {
             return (
               <div
                 key={msg.id}
-                className="pl-14 hover:bg-white/[0.02] py-0.5 group relative"
+                className={`pl-14 hover:bg-white/[0.02] py-0.5 group relative${animClass}`}
+                onMouseEnter={() => setHoveredMsgId(msg.id)}
+                onMouseLeave={() => setHoveredMsgId(null)}
               >
                 <span className="absolute left-0 text-[11px] text-discord-muted opacity-0 group-hover:opacity-100 w-[52px] text-right select-none top-1.5">
                   {formatShortTime(msg.timestamp)}
                 </span>
+                {hoveredMsgId === msg.id && (
+                  <div className="absolute -top-3 right-2 z-10">
+                    <ReactionPicker onSelect={reactTo} />
+                  </div>
+                )}
                 <MessageContent content={msg.content} />
                 <MessageAttachments attachments={msg.attachments} />
+                <ReactionPills reactions={msg.reactions} currentUser={currentUser} onToggle={reactTo} />
               </div>
             );
           }
@@ -245,8 +311,15 @@ export default function TextChannel({ channel, messages, onSendMessage, isDM, dm
           return (
             <div
               key={msg.id}
-              className={`flex gap-4 hover:bg-white/[0.02] py-1 rounded ${i > 0 ? 'mt-4' : ''}`}
+              className={`flex gap-4 hover:bg-white/[0.02] py-1 rounded relative ${i > 0 ? 'mt-4' : ''}${animClass}`}
+              onMouseEnter={() => setHoveredMsgId(msg.id)}
+              onMouseLeave={() => setHoveredMsgId(null)}
             >
+              {hoveredMsgId === msg.id && (
+                <div className="absolute -top-3 right-2 z-10">
+                  <ReactionPicker onSelect={reactTo} />
+                </div>
+              )}
               <div
                 className="w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center text-white font-semibold text-sm mt-1 cursor-pointer hover:opacity-90 transition-opacity"
                 style={{ backgroundColor: msg.avatarColor }}
@@ -264,6 +337,7 @@ export default function TextChannel({ channel, messages, onSendMessage, isDM, dm
                 </div>
                 <MessageContent content={msg.content} />
                 <MessageAttachments attachments={msg.attachments} />
+                <ReactionPills reactions={msg.reactions} currentUser={currentUser} onToggle={reactTo} />
               </div>
             </div>
           );

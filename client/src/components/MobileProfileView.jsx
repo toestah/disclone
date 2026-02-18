@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import StatusDot, { STATUS_CONFIG } from './StatusDot.jsx';
 
-export default function MobileProfileView({ user, userStatus, onStatusChange, onLogout, voiceState, voiceChannel }) {
+export default function MobileProfileView({ user, userStatus, onStatusChange, onLogout, voiceState, voiceChannel, sounds }) {
   const [showSettings, setShowSettings] = useState(false);
   const settingsRef = useRef(null);
 
@@ -143,6 +143,42 @@ export default function MobileProfileView({ user, userStatus, onStatusChange, on
           )}
         </div>
 
+        {/* Sound settings */}
+        {sounds && (
+          <div className="bg-discord-dark/60 rounded-lg p-3 mb-4">
+            <div className="text-[11px] font-bold text-discord-muted uppercase tracking-wide mb-3">
+              Sound Effects
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[12px] text-discord-text">UI Sounds</div>
+                <div className="text-[10px] text-discord-muted/60 mt-0.5">Feedback sounds for actions</div>
+              </div>
+              <button
+                onClick={() => sounds.setEnabled(!sounds.enabled)}
+                className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                  sounds.enabled ? 'bg-discord-green' : 'bg-discord-muted/30'
+                }`}
+              >
+                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                  sounds.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                }`} />
+              </button>
+            </div>
+            {sounds.enabled && (
+              <div className="mt-2.5">
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] text-discord-muted">Volume</label>
+                  <span className="text-[11px] text-discord-muted tabular-nums">{sounds.volume}%</span>
+                </div>
+                <input type="range" min="0" max="100" value={sounds.volume}
+                  onChange={(e) => sounds.setVolume(Number(e.target.value))}
+                  className="voice-slider w-full" />
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Logout */}
         <button
           onClick={onLogout}
@@ -153,6 +189,10 @@ export default function MobileProfileView({ user, userStatus, onStatusChange, on
           </svg>
           <span className="text-[14px] font-medium">Log Out</span>
         </button>
+
+        <div className="mt-4 text-center">
+          <span className="text-[10px] text-discord-muted/40">Disclone v{__APP_VERSION__}</span>
+        </div>
       </div>
     </div>
   );

@@ -1,0 +1,37 @@
+{
+  "id": "com.datapulsecorp.coturn",
+  "title": "Coturn TURN Server",
+  "author": "Taimur",
+  "description": "TURN/STUN relay server for WebRTC NAT traversal",
+  "tagline": "WebRTC relay",
+  "version": "1.0.0",
+  "healthCheckPath": "/",
+  "httpPort": 8080,
+  "addons": {},
+  "manifestVersion": 2,
+  "website": "https://github.com/coturn/coturn",
+  "tags": ["voip", "webrtc"],
+  "tcpPorts": {
+    "TURN_PORT": {
+      "title": "TURN TCP",
+      "description": "TURN listening port (TCP)",
+      "defaultValue": 3478,
+      "containerPort": 3478
+    }
+  },
+  "udpPorts": {
+    "TURN_UDP_PORT": {
+      "title": "TURN UDP",
+      "description": "TURN listening port (UDP)",
+      "defaultValue": 3478,
+      "containerPort": 3478
+    },
+    "RELAY_UDP_PORT": {
+      "title": "Relay range",
+      "description": "TURN relay port range start (100 ports)",
+      "defaultValue": 49152,
+      "containerPort": 49152,
+      "portCount": 100
+    }
+  }
+}

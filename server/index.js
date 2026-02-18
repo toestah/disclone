@@ -94,6 +94,8 @@ let messageIdCounter = 0;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+const REACTION_EMOJI = ['👍', '👎', '😂', '❤️', '🔥', '💯'];
+
 const AVATAR_COLORS = [
   '#5865f2', '#57f287', '#fee75c', '#eb459e',
   '#ed4245', '#f47b67', '#e78284', '#9b59b6',
@@ -325,6 +327,39 @@ io.on('connection', (socket) => {
     }
 
     io.to(channelId).emit('message:new', { channelId, message });
+  });
+
+  // ── Message Reactions ──
+
+  socket.on('message:react', ({ channelId, messageId, emoji }) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return;
+    if (!REACTION_EMOJI.includes(emoji)) return;
+
+    const history = messageHistory.get(channelId);
+    if (!history) return;
+
+    const msg = history.find((m) => m.id === messageId);
+    if (!msg) return;
+
+    if (!msg.reactions) msg.reactions = {};
+    if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
+
+    const arr = msg.reactions[emoji];
+    const idx = arr.indexOf(session.username);
+    if (idx !== -1) {
+      arr.splice(idx, 1);
+      if (arr.length === 0) delete msg.reactions[emoji];
+      if (Object.keys(msg.reactions).length === 0) delete msg.reactions;
+    } else {
+      arr.push(session.username);
+    }
+
+    io.to(channelId).emit('message:reaction', {
+      channelId,
+      messageId,
+      reactions: msg.reactions || {},
+    });
   });
 
   // ── Voice Channels ──

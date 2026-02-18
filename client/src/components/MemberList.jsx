@@ -9,11 +9,12 @@ const STATUS_GROUPS = [
   { key: 'offline', label: 'Offline' },
 ];
 
-export default function MemberList({ users, currentUser, onOpenDM, user, userStatus, onStatusChange, onLogout, voiceState, voiceChannel }) {
+export default function MemberList({ users, currentUser, onOpenDM, user, userStatus, onStatusChange, onLogout, voiceState, voiceChannel, sounds }) {
   const [collapsed, setCollapsed] = useState({});
   const [contextMenu, setContextMenu] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showStatusPicker, setShowStatusPicker] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const settingsRef = useRef(null);
   const statusRef = useRef(null);
 
@@ -61,10 +62,10 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
   const statusConfig = STATUS_CONFIG[userStatus] || STATUS_CONFIG.online;
 
   return (
-    <div className="w-full sm:w-60 h-full bg-discord-darker flex-shrink-0 flex flex-col border-l border-black/30 pb-14 sm:pb-0">
+    <div className="w-full sm:w-32 lg:w-60 sm:transition-[width] sm:duration-300 sm:ease-in-out h-full bg-discord-darker/80 flex-shrink-0 flex flex-col border-l border-black/30 pb-14 sm:pb-0">
       {/* Member list */}
       <div className="flex-1 overflow-y-auto">
-        <div className="pt-6 px-2">
+        <div className="pt-6 px-2 sm:px-1 lg:px-2">
           {STATUS_GROUPS.map(({ key, label }) => {
             const groupUsers = grouped[key];
             if (groupUsers.length === 0) return null;
@@ -123,10 +124,10 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
 
       {/* User bar — pinned bottom */}
       {user && (
-        <div className="relative px-2 py-2 bg-discord-dark/80 border-t border-black/40 flex-shrink-0" ref={settingsRef}>
+        <div className="relative px-2 sm:px-1 lg:px-2 py-2 bg-discord-dark/70 border-t border-black/40 flex-shrink-0" ref={settingsRef}>
           {/* Settings popover */}
           {showSettings && (
-            <div className="absolute bottom-full left-2 right-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 p-3 z-50">
+            <div className="absolute bottom-full right-0 w-72 lg:right-2 lg:left-2 lg:w-auto mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 p-3 z-50 popover-enter">
               <div className="text-[11px] font-bold text-discord-muted uppercase tracking-wide mb-3">
                 Voice Settings
               </div>
@@ -179,6 +180,37 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
                   </button>
                 </div>
               </div>
+              {sounds && (
+                <div className="mt-3 pt-3 border-t border-white/5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-[12px] text-discord-text">Sound Effects</div>
+                      <div className="text-[10px] text-discord-muted/60 mt-0.5">UI feedback sounds</div>
+                    </div>
+                    <button
+                      onClick={() => sounds.setEnabled(!sounds.enabled)}
+                      className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                        sounds.enabled ? 'bg-discord-green' : 'bg-discord-muted/30'
+                      }`}
+                    >
+                      <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                        sounds.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                      }`} />
+                    </button>
+                  </div>
+                  {sounds.enabled && (
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] text-discord-muted">Volume</label>
+                        <span className="text-[11px] text-discord-muted tabular-nums">{sounds.volume}%</span>
+                      </div>
+                      <input type="range" min="0" max="100" value={sounds.volume}
+                        onChange={(e) => sounds.setVolume(Number(e.target.value))}
+                        className="voice-slider w-full" />
+                    </div>
+                  )}
+                </div>
+              )}
               {voiceChannel && (
                 <div className="mt-2.5">
                   <div className="text-[11px] text-discord-muted mb-1">Mic Level</div>
@@ -198,12 +230,15 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
                   </div>
                 </div>
               )}
+              <div className="mt-3 pt-3 border-t border-white/5 text-center">
+                <span className="text-[10px] text-discord-muted/40">Disclone v{__APP_VERSION__}</span>
+              </div>
             </div>
           )}
 
           {/* Status picker */}
           {showStatusPicker && (
-            <div ref={statusRef} className="absolute bottom-full left-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 z-50 w-48">
+            <div ref={statusRef} className="absolute bottom-full right-0 lg:right-auto lg:left-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 z-50 w-48 popover-enter">
               {Object.entries(STATUS_CONFIG).map(([key, config]) => (
                 <button
                   key={key}
@@ -227,7 +262,8 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
             </div>
           )}
 
-          <div className="flex items-center gap-2.5 px-1.5 py-1 rounded hover:bg-discord-hover/50 transition-colors">
+          {/* User info + actions — vertical on tablet, horizontal on desktop/mobile */}
+          <div className="flex items-center gap-2.5 px-1.5 py-1 w-full rounded hover:bg-discord-hover/50 transition-colors sm:flex-col sm:items-center sm:gap-1 sm:px-0.5 sm:py-2 lg:flex-row lg:items-center lg:gap-2.5 lg:px-1.5 lg:py-1">
             <div
               className="relative flex-shrink-0 cursor-pointer"
               onClick={() => setShowStatusPicker((s) => !s)}
@@ -244,7 +280,7 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
               </div>
             </div>
             <div
-              className="flex-1 min-w-0 cursor-pointer"
+              className="min-w-0 flex-1 cursor-pointer sm:text-center sm:flex-initial lg:text-left lg:flex-1"
               onClick={() => setShowStatusPicker((s) => !s)}
               title="Change status"
             >
@@ -255,29 +291,55 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
                 {statusConfig.label}
               </div>
             </div>
-            <button
-              onClick={onLogout}
-              className="p-1.5 rounded transition-colors flex-shrink-0 text-discord-muted hover:text-discord-red hover:bg-discord-red/10"
-              title="Log Out"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M10.09 15.59L11.5 17l5-5-5-5-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59zM19 3H5c-1.11 0-2 .9-2 2v4h2V5h14v14H5v-4H3v4c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
-              </svg>
-            </button>
-            <button
-              onClick={() => setShowSettings((s) => !s)}
-              className={`p-1.5 rounded transition-colors flex-shrink-0 ${
-                showSettings
-                  ? 'text-white bg-discord-active'
-                  : 'text-discord-muted hover:text-discord-text hover:bg-discord-hover'
-              }`}
-              title="Voice Settings"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" />
-              </svg>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setShowSettings((s) => !s)}
+                className={`p-2 rounded transition-colors flex-shrink-0 ${
+                  showSettings
+                    ? 'text-white bg-discord-active'
+                    : 'text-discord-muted hover:text-discord-text hover:bg-discord-hover'
+                }`}
+                title="Voice Settings"
+              >
+                <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setShowLogoutConfirm(true)}
+                className="p-2 rounded transition-colors flex-shrink-0 text-discord-red/70 hover:text-discord-red hover:bg-discord-red/10"
+                title="Log Out"
+              >
+                <svg className="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M10.09 15.59L11.5 17l5-5-5-5-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59zM19 3H5c-1.11 0-2 .9-2 2v4h2V5h14v14H5v-4H3v4c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z" />
+                </svg>
+              </button>
+            </div>
           </div>
+
+          {/* Logout confirmation modal */}
+          {showLogoutConfirm && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60" onClick={() => setShowLogoutConfirm(false)}>
+              <div className="bg-discord-darker rounded-xl shadow-2xl border border-white/10 p-5 w-80 popover-enter" onClick={(e) => e.stopPropagation()}>
+                <h3 className="text-lg font-bold text-white mb-2">Log Out</h3>
+                <p className="text-sm text-discord-muted mb-5">Are you sure you want to log out?</p>
+                <div className="flex gap-3 justify-end">
+                  <button
+                    onClick={() => setShowLogoutConfirm(false)}
+                    className="px-4 py-2 rounded text-sm font-medium text-discord-text hover:underline transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => { setShowLogoutConfirm(false); onLogout(); }}
+                    className="px-4 py-2 rounded text-sm font-medium bg-discord-red hover:bg-discord-red/80 text-white transition-colors"
+                  >
+                    Log Out
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
