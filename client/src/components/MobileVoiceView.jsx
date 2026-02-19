@@ -5,6 +5,7 @@ export default function MobileVoiceView({ voiceChannel, voiceChannelName, voiceM
     isMuted, isSpeaking, speakingPeers, toggleMute,
     isSharing, sharingUser, startSharing, stopSharing, sharingSupported,
     musicVolume, setMusicVolume, shareVolume, setShareVolume, musicAnalyserRef,
+    isScreenSharing, screenSharer, startScreenShare, stopScreenShare, screenShareSupported,
   } = voiceState || {};
 
   const members = voiceMembers?.get(voiceChannel) || [];
@@ -105,6 +106,24 @@ export default function MobileVoiceView({ voiceChannel, voiceChannelName, voiceM
           >
             <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+            </svg>
+          </button>
+        )}
+        {screenShareSupported && (
+          <button
+            onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+            disabled={!!(screenSharer && !isScreenSharing)}
+            className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${
+              isScreenSharing
+                ? 'bg-discord-green text-white'
+                : screenSharer
+                  ? 'bg-discord-darker text-discord-muted/40 cursor-not-allowed'
+                  : 'bg-discord-darker text-discord-text hover:bg-discord-hover'
+            }`}
+            title={isScreenSharing ? 'Stop sharing screen' : 'Share screen'}
+          >
+            <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z" />
             </svg>
           </button>
         )}

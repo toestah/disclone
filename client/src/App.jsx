@@ -9,6 +9,7 @@ import MemberList from './components/MemberList.jsx';
 import MobileTabBar from './components/MobileTabBar.jsx';
 import MobileVoiceView from './components/MobileVoiceView.jsx';
 import MobileProfileView from './components/MobileProfileView.jsx';
+import ScreenViewer from './components/ScreenViewer.jsx';
 
 function AppContent() {
   const { socket, connected } = useSocket();
@@ -394,7 +395,23 @@ function AppContent() {
       </div>
 
       {/* Main chat — desktop: flex column, mobile: full-screen when chat tab */}
-      <main className={`flex-1 flex flex-col bg-discord-chat min-w-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 ambient-bg ambient-bg-chat ${effectiveMobileTab !== 'chat' ? 'max-sm:hidden' : ''}`}>
+      <main className={`flex-1 flex flex-col bg-discord-chat min-w-0 max-sm:fixed max-sm:inset-0 max-sm:z-30 ambient-bg ambient-bg-chat relative ${effectiveMobileTab !== 'chat' ? 'max-sm:hidden' : ''}`}>
+        {/* Screen share notification bar */}
+        {voiceState.screenSharer && !voiceState.isScreenSharing && !voiceState.screenStream && (
+          <div className="flex items-center gap-3 px-4 py-2 bg-discord-brand/90 text-white text-sm flex-shrink-0">
+            <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z" />
+            </svg>
+            <span className="truncate">{voiceState.screenSharer.username} is sharing their screen</span>
+            <button
+              onClick={() => voiceState.watchScreen(voiceState.screenSharer.socketId)}
+              className="ml-auto px-3 py-1 rounded text-sm font-medium bg-white/20 hover:bg-white/30 transition-colors flex-shrink-0"
+            >
+              Watch Stream
+            </button>
+          </div>
+        )}
+
         {activeDM && activeDMInfo ? (
           <TextChannel
             key={activeDM}
@@ -417,6 +434,15 @@ function AppContent() {
               currentUser={user.username}
             />
           )
+        )}
+
+        {/* Screen viewer overlay */}
+        {voiceState.screenStream && (
+          <ScreenViewer
+            screenStream={voiceState.screenStream}
+            screenSharer={voiceState.screenSharer}
+            onStopWatching={voiceState.stopWatching}
+          />
         )}
       </main>
 

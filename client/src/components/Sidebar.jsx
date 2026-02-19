@@ -22,6 +22,7 @@ export default function Sidebar({
     isMuted, isSpeaking, speakingPeers, toggleMute,
     isSharing, sharingUser, startSharing, stopSharing, sharingSupported, musicVolume, setMusicVolume,
     shareVolume, setShareVolume, musicAnalyserRef,
+    isScreenSharing, screenSharer, startScreenShare, stopScreenShare, screenShareSupported,
   } = voiceState || {};
 
   return (
@@ -123,8 +124,13 @@ export default function Sidebar({
                               <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
                             </svg>
                           )}
+                          {member.screenSharing && (
+                            <svg className={`w-3.5 h-3.5 text-discord-green flex-shrink-0 ${memberSharing ? '' : 'ml-auto'}`} viewBox="0 0 24 24" fill="currentColor" title="Sharing screen">
+                              <path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z" />
+                            </svg>
+                          )}
                           {((isSelf && isMuted) || member.muted) && (
-                            <svg className={`w-3.5 h-3.5 text-discord-red flex-shrink-0 ${memberSharing ? '' : 'ml-auto'}`} viewBox="0 0 24 24" fill="currentColor">
+                            <svg className={`w-3.5 h-3.5 text-discord-red flex-shrink-0 ${(memberSharing || member.screenSharing) ? '' : 'ml-auto'}`} viewBox="0 0 24 24" fill="currentColor">
                               <path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z" />
                             </svg>
                           )}
@@ -225,6 +231,24 @@ export default function Sidebar({
               >
                 <svg className="w-4.5 h-4.5" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+                </svg>
+              </button>
+            )}
+            {screenShareSupported && (
+              <button
+                onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+                disabled={!!(screenSharer && !isScreenSharing)}
+                className={`flex-1 flex items-center justify-center p-1.5 rounded transition-colors ${
+                  isScreenSharing
+                    ? 'bg-discord-green/20 text-discord-green hover:bg-discord-green/30'
+                    : screenSharer
+                      ? 'text-discord-muted/40 cursor-not-allowed'
+                      : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+                }`}
+                title={isScreenSharing ? 'Stop sharing screen' : screenSharer ? `${screenSharer.username} is sharing screen` : 'Share screen'}
+              >
+                <svg className="w-4.5 h-4.5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z" />
                 </svg>
               </button>
             )}

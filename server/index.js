@@ -87,6 +87,9 @@ const mutedState = new Map();
 // Music sharers: channelId -> { socketId, title } (one sharer per room)
 const musicSharers = new Map();
 
+// Screen sharers: channelId -> { socketId, username } (one sharer per room)
+const screenSharers = new Map();
+
 // DM channels: username -> Set<dmChannelId>
 const userDMChannels = new Map();
 
@@ -159,6 +162,7 @@ function getVoiceRoomMembers(channelId) {
         avatarColor: session.avatarColor,
         speaking: speakingState.get(socketId) || false,
         muted: mutedState.get(socketId) || false,
+        screenSharing: screenSharers.get(channelId)?.socketId === socketId,
       });
     }
   }
@@ -431,7 +435,20 @@ io.on('connection', (socket) => {
       }
     }
 
-    callback?.({ success: true, peers: existingPeers, musicSharer });
+    // Include active screen sharer so late joiners can watch
+    let screenSharer = null;
+    const activeScreenSharer = screenSharers.get(channelId);
+    if (activeScreenSharer) {
+      const sharerSession = activeSessions.get(activeScreenSharer.socketId);
+      if (sharerSession) {
+        screenSharer = {
+          socketId: activeScreenSharer.socketId,
+          username: sharerSession.username,
+        };
+      }
+    }
+
+    callback?.({ success: true, peers: existingPeers, musicSharer, screenSharer });
 
     io.emit('voice:room-update', {
       channelId,
@@ -450,6 +467,15 @@ io.on('connection', (socket) => {
       if (musicSharers.get(channelId)?.socketId === socket.id) {
         musicSharers.delete(channelId);
         socket.to(`voice:${channelId}`).emit('music:stopped', {
+          channelId,
+          socketId: socket.id,
+        });
+      }
+
+      // Clean up screen sharing if this user was sharing
+      if (screenSharers.get(channelId)?.socketId === socket.id) {
+        screenSharers.delete(channelId);
+        socket.to(`voice:${channelId}`).emit('screen:stopped', {
           channelId,
           socketId: socket.id,
         });
@@ -585,6 +611,86 @@ io.on('connection', (socket) => {
       channelId,
       title: safeTitle,
     });
+  });
+
+  // ── Screen Sharing ──
+
+  socket.on('screen:start', ({ channelId }, callback) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return callback?.({ success: false, error: 'Not logged in' });
+
+    const room = voiceRooms.get(channelId);
+    if (!room || !room.has(socket.id)) {
+      return callback?.({ success: false, error: 'Not in this voice channel' });
+    }
+
+    const existingSharer = screenSharers.get(channelId);
+    if (existingSharer && existingSharer.socketId !== socket.id) {
+      const sharerSession = activeSessions.get(existingSharer.socketId);
+      return callback?.({ success: false, error: `${sharerSession?.username || 'Someone'} is already sharing their screen` });
+    }
+
+    screenSharers.set(channelId, { socketId: socket.id, username: session.username });
+    socket.to(`voice:${channelId}`).emit('screen:started', {
+      channelId,
+      socketId: socket.id,
+      username: session.username,
+    });
+    callback?.({ success: true });
+
+    io.emit('voice:room-update', {
+      channelId,
+      members: getVoiceRoomMembers(channelId),
+    });
+  });
+
+  socket.on('screen:stop', ({ channelId }) => {
+    if (screenSharers.get(channelId)?.socketId !== socket.id) return;
+    screenSharers.delete(channelId);
+    socket.to(`voice:${channelId}`).emit('screen:stopped', {
+      channelId,
+      socketId: socket.id,
+    });
+
+    io.emit('voice:room-update', {
+      channelId,
+      members: getVoiceRoomMembers(channelId),
+    });
+  });
+
+  socket.on('screen:watch', ({ sharerSocketId }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const sharerRoom = findPeerVoiceRoom(sharerSocketId);
+    if (room !== sharerRoom) return;
+    if (screenSharers.get(room)?.socketId !== sharerSocketId) return;
+    io.to(sharerSocketId).emit('screen:viewer-ready', {
+      viewerSocketId: socket.id,
+    });
+  });
+
+  socket.on('screen:offer', ({ targetId, offer }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('screen:offer', { from: socket.id, offer });
+  });
+
+  socket.on('screen:answer', ({ targetId, answer }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('screen:answer', { from: socket.id, answer });
+  });
+
+  socket.on('screen:ice-candidate', ({ targetId, candidate }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('screen:ice-candidate', { from: socket.id, candidate });
   });
 
   // ── Direct Messages ──
@@ -728,6 +834,15 @@ io.on('connection', (socket) => {
         if (musicSharers.get(roomId)?.socketId === socket.id) {
           musicSharers.delete(roomId);
           socket.to(`voice:${roomId}`).emit('music:stopped', {
+            channelId: roomId,
+            socketId: socket.id,
+          });
+        }
+
+        // Clean up screen sharing if this user was sharing
+        if (screenSharers.get(roomId)?.socketId === socket.id) {
+          screenSharers.delete(roomId);
+          socket.to(`voice:${roomId}`).emit('screen:stopped', {
             channelId: roomId,
             socketId: socket.id,
           });

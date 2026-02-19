@@ -126,6 +126,11 @@ export default function useVoice(channelId, playSound) {
     return saved === 'manual' ? 'manual' : 'auto';
   });
 
+  // Screen sharing state
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [screenSharer, setScreenSharer] = useState(null); // { socketId, username } | null
+  const [screenStream, setScreenStream] = useState(null); // remote MediaStream for viewer
+
   // ── Refs ──
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -165,6 +170,12 @@ export default function useVoice(channelId, playSound) {
   const keepaliveAudioRef = useRef(null);
   const wakeLockRef = useRef(null);
 
+  // Screen sharing refs
+  const screenPCsRef = useRef(new Map()); // peerId → RTCPeerConnection (separate from audio PCs)
+  const screenStreamRef = useRef(null); // local getDisplayMedia stream
+  const isScreenSharingRef = useRef(false);
+  const stopScreenSharingRef = useRef(null);
+
   // Keep refs in sync
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
@@ -172,6 +183,7 @@ export default function useVoice(channelId, playSound) {
   isSharingRef.current = isSharing;
   noiseSuppressionRef.current = noiseSuppression;
   sensitivityModeRef.current = sensitivityMode;
+  isScreenSharingRef.current = isScreenSharing;
 
   const setSensitivity = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
@@ -572,6 +584,156 @@ export default function useVoice(channelId, playSound) {
       }
     }
 
+    // ── Screen sharing helpers ──
+
+    function closeScreenPC(peerId) {
+      const pc = screenPCsRef.current.get(peerId);
+      if (pc) {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+        screenPCsRef.current.delete(peerId);
+      }
+    }
+
+    function closeAllScreenPCs() {
+      for (const [peerId] of screenPCsRef.current) {
+        closeScreenPC(peerId);
+      }
+      screenPCsRef.current.clear();
+    }
+
+    // Sharer side: create PC with screen tracks, send offer to viewer
+    function createScreenOffer(viewerSocketId) {
+      closeScreenPC(viewerSocketId);
+      const stream = screenStreamRef.current;
+      if (!stream) return;
+
+      const pc = new RTCPeerConnection(iceConfig);
+      screenPCsRef.current.set(viewerSocketId, pc);
+
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          socket.emit('screen:ice-candidate', {
+            targetId: viewerSocketId,
+            candidate: e.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === 'failed' || state === 'disconnected') {
+          closeScreenPC(viewerSocketId);
+        }
+      };
+
+      pc.createOffer().then((offer) => {
+        return pc.setLocalDescription(offer);
+      }).then(() => {
+        socket.emit('screen:offer', {
+          targetId: viewerSocketId,
+          offer: pc.localDescription.toJSON(),
+        });
+        // Set initial max bitrate for video
+        for (const sender of pc.getSenders()) {
+          if (sender.track?.kind === 'video') {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = 6_000_000;
+            sender.setParameters(params).catch(() => {});
+          }
+        }
+      }).catch((e) => {
+        console.error('[Screen] createOffer error:', e);
+      });
+    }
+
+    // Viewer side: handle offer from sharer, set ontrack to capture stream
+    async function handleScreenRemoteOffer(sharerSocketId, offer) {
+      closeScreenPC(sharerSocketId);
+
+      const pc = new RTCPeerConnection(iceConfig);
+      screenPCsRef.current.set(sharerSocketId, pc);
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          socket.emit('screen:ice-candidate', {
+            targetId: sharerSocketId,
+            candidate: e.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.ontrack = (e) => {
+        console.log('[Screen] ontrack from sharer', sharerSocketId);
+        const stream = e.streams[0] || new MediaStream([e.track]);
+        setScreenStream(stream);
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === 'failed' || state === 'disconnected') {
+          closeScreenPC(sharerSocketId);
+          setScreenStream(null);
+        }
+      };
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('screen:answer', {
+          targetId: sharerSocketId,
+          answer: pc.localDescription.toJSON(),
+        });
+      } catch (e) {
+        console.error('[Screen] handleRemoteOffer error:', e);
+      }
+    }
+
+    // ── Screen sharing event handlers ──
+
+    function handleScreenStarted({ socketId, username }) {
+      setScreenSharer({ socketId, username });
+    }
+
+    function handleScreenStopped() {
+      setScreenSharer(null);
+      closeAllScreenPCs();
+      setScreenStream(null);
+    }
+
+    function handleScreenViewerReady({ viewerSocketId }) {
+      if (!isScreenSharingRef.current) return;
+      createScreenOffer(viewerSocketId);
+    }
+
+    function handleScreenOffer({ from, offer }) {
+      handleScreenRemoteOffer(from, offer);
+    }
+
+    function handleScreenAnswer({ from, answer }) {
+      const pc = screenPCsRef.current.get(from);
+      if (!pc) return;
+      pc.setRemoteDescription(new RTCSessionDescription(answer)).catch((e) => {
+        console.error('[Screen] setRemoteDescription(answer) error:', e);
+      });
+    }
+
+    function handleScreenIceCandidate({ from, candidate }) {
+      const pc = screenPCsRef.current.get(from);
+      if (!pc) return;
+      if (candidate) {
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      }
+    }
+
     // ── Register signaling listeners BEFORE voice:join ──
     socket.on('webrtc:offer', handleOffer);
     socket.on('webrtc:answer', handleAnswer);
@@ -583,6 +745,12 @@ export default function useVoice(channelId, playSound) {
     socket.on('music:stopped', handleMusicStopped);
     socket.on('music:chunk', handleMusicChunk);
     socket.on('music:title', handleMusicTitle);
+    socket.on('screen:started', handleScreenStarted);
+    socket.on('screen:stopped', handleScreenStopped);
+    socket.on('screen:viewer-ready', handleScreenViewerReady);
+    socket.on('screen:offer', handleScreenOffer);
+    socket.on('screen:answer', handleScreenAnswer);
+    socket.on('screen:ice-candidate', handleScreenIceCandidate);
 
     // ── Init ──
 
@@ -615,6 +783,11 @@ export default function useVoice(channelId, playSound) {
       // Show jukebox if someone is already sharing
       if (joinResponse?.musicSharer) {
         setSharingUser(joinResponse.musicSharer);
+      }
+
+      // Show screen sharer if someone is already sharing screen
+      if (joinResponse?.screenSharer) {
+        setScreenSharer(joinResponse.screenSharer);
       }
 
       try {
@@ -931,6 +1104,26 @@ export default function useVoice(channelId, playSound) {
       socket.off('music:stopped', handleMusicStopped);
       socket.off('music:chunk', handleMusicChunk);
       socket.off('music:title', handleMusicTitle);
+      socket.off('screen:started', handleScreenStarted);
+      socket.off('screen:stopped', handleScreenStopped);
+      socket.off('screen:viewer-ready', handleScreenViewerReady);
+      socket.off('screen:offer', handleScreenOffer);
+      socket.off('screen:answer', handleScreenAnswer);
+      socket.off('screen:ice-candidate', handleScreenIceCandidate);
+
+      // Clean up screen sharing if active
+      if (isScreenSharingRef.current) {
+        socket.emit('screen:stop', { channelId });
+        setIsScreenSharing(false);
+        isScreenSharingRef.current = false;
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
+        screenStreamRef.current = null;
+      }
+      closeAllScreenPCs();
+      setScreenSharer(null);
+      setScreenStream(null);
 
       // Clean up music sharing if active
       if (isSharingRef.current) {
@@ -1266,6 +1459,93 @@ export default function useVoice(channelId, playSound) {
 
   stopSharingRef.current = stopSharing;
 
+  // ── Screen sharing callbacks ──
+
+  const screenShareSupported = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getDisplayMedia;
+
+  const startScreenShare = useCallback(async () => {
+    if (!socket || !channelIdRef.current || isScreenSharingRef.current) return;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+        audio: true,
+      });
+    } catch (err) {
+      if (err.name === 'NotAllowedError') return;
+      console.error('[Screen] getDisplayMedia error:', err);
+      return;
+    }
+
+    // Set content hint for gaming optimization
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      try { videoTrack.contentHint = 'motion'; } catch { /* ignore */ }
+    }
+
+    screenStreamRef.current = stream;
+
+    socket.emit('screen:start', { channelId: channelIdRef.current }, (response) => {
+      if (!response?.success) {
+        alert(response?.error || 'Could not start screen sharing');
+        stream.getTracks().forEach((t) => t.stop());
+        screenStreamRef.current = null;
+        return;
+      }
+      setIsScreenSharing(true);
+      isScreenSharingRef.current = true;
+      setScreenSharer({ socketId: socket.id, username: 'You' });
+    });
+
+    // Listen for browser "Stop sharing" button
+    if (videoTrack) {
+      videoTrack.addEventListener('ended', () => {
+        stopScreenSharingRef.current?.();
+      });
+    }
+  }, [socket]);
+
+  const stopScreenShare = useCallback(() => {
+    if (!socket) return;
+    socket.emit('screen:stop', { channelId: channelIdRef.current });
+
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((t) => t.stop());
+      screenStreamRef.current = null;
+    }
+    // Close all screen PCs (viewers' connections)
+    for (const [, pc] of screenPCsRef.current) {
+      pc.onicecandidate = null;
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+      pc.close();
+    }
+    screenPCsRef.current.clear();
+
+    setIsScreenSharing(false);
+    isScreenSharingRef.current = false;
+    setScreenSharer(null);
+  }, [socket]);
+
+  stopScreenSharingRef.current = stopScreenShare;
+
+  const watchScreen = useCallback((sharerSocketId) => {
+    if (!socket) return;
+    socket.emit('screen:watch', { sharerSocketId });
+  }, [socket]);
+
+  const stopWatching = useCallback(() => {
+    for (const [, pc] of screenPCsRef.current) {
+      pc.onicecandidate = null;
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+      pc.close();
+    }
+    screenPCsRef.current.clear();
+    setScreenStream(null);
+  }, []);
+
   const setMusicVolume = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
     setMusicVolumeState(v);
@@ -1309,5 +1589,13 @@ export default function useVoice(channelId, playSound) {
     noiseSuppression,
     setNoiseSuppression,
     musicAnalyserRef,
+    isScreenSharing,
+    screenSharer,
+    screenStream,
+    startScreenShare,
+    stopScreenShare,
+    watchScreen,
+    stopWatching,
+    screenShareSupported,
   };
 }
