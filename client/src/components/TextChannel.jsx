@@ -57,8 +57,48 @@ function YouTubeEmbed({ videoId }) {
   );
 }
 
-function MessageContent({ content }) {
+const MENTION_REGEX = /@(\w{1,20})\b/g;
+
+function MentionSpan({ username, onOpenDM }) {
+  return (
+    <span
+      className="bg-discord-accent/25 text-discord-accent rounded px-0.5 cursor-pointer hover:bg-discord-accent/40"
+      onClick={() => onOpenDM?.(username)}
+    >
+      @{username}
+    </span>
+  );
+}
+
+function renderTextWithMentions(text, knownUsernames, keyBase, onOpenDM) {
+  const parts = [];
+  let lastIdx = 0;
+  for (const match of text.matchAll(MENTION_REGEX)) {
+    if (match.index > lastIdx) {
+      parts.push(<span key={`${keyBase}-t${lastIdx}`}>{text.slice(lastIdx, match.index)}</span>);
+    }
+    const mentionedName = match[1];
+    if (knownUsernames.has(mentionedName)) {
+      parts.push(<MentionSpan key={`${keyBase}-m${match.index}`} username={mentionedName} onOpenDM={onOpenDM} />);
+    } else {
+      parts.push(<span key={`${keyBase}-t${match.index}`}>{match[0]}</span>);
+    }
+    lastIdx = match.index + match[0].length;
+  }
+  if (lastIdx < text.length) {
+    parts.push(<span key={`${keyBase}-t${lastIdx}`}>{text.slice(lastIdx)}</span>);
+  }
+  return parts;
+}
+
+function MessageContent({ content, onlineUsers, onOpenDM }) {
   if (!content) return null;
+
+  // Build a set of known usernames for mention highlighting
+  const knownUsernames = new Set();
+  if (onlineUsers) {
+    for (const u of onlineUsers) knownUsernames.add(u.username);
+  }
 
   // Split content by URLs, linkify them, and detect YouTube
   const parts = [];
@@ -83,7 +123,7 @@ function MessageContent({ content }) {
     <>
       <div className="text-discord-text leading-[1.625] break-words mt-0.5 text-[15px]">
         {parts.length === 0
-          ? content
+          ? renderTextWithMentions(content, knownUsernames, '0', onOpenDM)
           : parts.map((p, i) =>
               p.type === 'link' ? (
                 <a
@@ -96,7 +136,7 @@ function MessageContent({ content }) {
                   {p.value}
                 </a>
               ) : (
-                <span key={i}>{p.value}</span>
+                <span key={i}>{renderTextWithMentions(p.value, knownUsernames, i, onOpenDM)}</span>
               )
             )}
       </div>
@@ -142,37 +182,98 @@ function ReactionPicker({ onSelect }) {
   );
 }
 
-function ReactionPills({ reactions, currentUser, onToggle }) {
-  if (!reactions || Object.keys(reactions).length === 0) return null;
+function ReactionTooltip({ emoji, users }) {
+  const maxShow = 8;
+  const shown = users.slice(0, maxShow);
+  const remaining = users.length - maxShow;
   return (
-    <div className="flex flex-wrap gap-1 mt-1">
-      {Object.entries(reactions).map(([emoji, users]) => {
-        const reacted = users.includes(currentUser);
-        return (
-          <button
-            key={emoji}
-            onClick={(e) => { e.stopPropagation(); onToggle(emoji); }}
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs border transition-colors ${
-              reacted
-                ? 'bg-discord-accent/20 border-discord-accent/50 text-discord-accent'
-                : 'bg-white/5 border-white/10 text-discord-muted hover:border-white/20'
-            }`}
-          >
-            <span className="text-sm leading-none">{emoji}</span>
-            <span>{users.length}</span>
-          </button>
-        );
-      })}
+    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2.5 py-1.5 bg-discord-dark border border-white/10 rounded-lg shadow-lg text-xs whitespace-nowrap z-30 pointer-events-none">
+      <div className="text-center text-base mb-1">{emoji}</div>
+      {shown.map((u) => (
+        <div key={u} className="text-discord-text leading-relaxed">{u}</div>
+      ))}
+      {remaining > 0 && (
+        <div className="text-discord-muted leading-relaxed">and {remaining} more...</div>
+      )}
+      <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px border-4 border-transparent border-t-discord-dark" />
     </div>
   );
 }
 
-export default function TextChannel({ channel, messages, onSendMessage, onReact, currentUser, isDM, dmTarget }) {
+function ReactionPill({ emoji, users, currentUser, onToggle }) {
+  const reacted = users.includes(currentUser);
+  const [showTooltip, setShowTooltip] = useState(false);
+  const longPressTimer = useRef(null);
+  const didLongPress = useRef(false);
+
+  const handlePointerDown = () => {
+    didLongPress.current = false;
+    longPressTimer.current = setTimeout(() => {
+      didLongPress.current = true;
+      setShowTooltip(true);
+    }, 400);
+  };
+
+  const handlePointerUp = (e) => {
+    clearTimeout(longPressTimer.current);
+    if (didLongPress.current) {
+      // Long press — just showed tooltip, don't toggle
+      e.preventDefault();
+      // Hide tooltip after a moment on mobile
+      setTimeout(() => setShowTooltip(false), 2000);
+    }
+  };
+
+  const handleClick = (e) => {
+    e.stopPropagation();
+    if (didLongPress.current) {
+      didLongPress.current = false;
+      return;
+    }
+    onToggle(emoji);
+  };
+
+  return (
+    <button
+      className={`relative inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs border transition-colors ${
+        reacted
+          ? 'bg-discord-accent/20 border-discord-accent/50 text-discord-accent'
+          : 'bg-white/5 border-white/10 text-discord-muted hover:border-white/20'
+      }`}
+      onClick={handleClick}
+      onMouseEnter={() => setShowTooltip(true)}
+      onMouseLeave={() => setShowTooltip(false)}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={() => { clearTimeout(longPressTimer.current); setShowTooltip(false); }}
+    >
+      {showTooltip && <ReactionTooltip emoji={emoji} users={users} />}
+      <span className="text-sm leading-none">{emoji}</span>
+      <span>{users.length}</span>
+    </button>
+  );
+}
+
+function ReactionPills({ reactions, currentUser, onToggle }) {
+  if (!reactions || Object.keys(reactions).length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1 mt-1">
+      {Object.entries(reactions).map(([emoji, users]) => (
+        <ReactionPill key={emoji} emoji={emoji} users={users} currentUser={currentUser} onToggle={onToggle} />
+      ))}
+    </div>
+  );
+}
+
+export default function TextChannel({ channel, messages, onSendMessage, onReact, currentUser, onlineUsers, onOpenDM, isDM, dmTarget }) {
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState([]);
   const [hoveredMsgId, setHoveredMsgId] = useState(null);
+  const [mentionQuery, setMentionQuery] = useState(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const inputRef = useRef(null);
   const seenIdsRef = useRef(new Set());
 
   // On mount (channel switch via key=), snapshot current message IDs so history doesn't animate
@@ -217,6 +318,65 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
       addImages(imageFiles);
     }
   }, [addImages]);
+
+  // @mention autocomplete
+  const mentionUsers = mentionQuery !== null && onlineUsers
+    ? onlineUsers
+        .filter((u) => u.username !== currentUser && u.username.toLowerCase().startsWith(mentionQuery.toLowerCase()))
+        .slice(0, 8)
+    : [];
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setInput(val);
+    // Check for @mention pattern before cursor
+    const cursorPos = e.target.selectionStart;
+    const textBeforeCursor = val.slice(0, cursorPos);
+    const mentionMatch = /@(\w{0,20})$/.exec(textBeforeCursor);
+    if (mentionMatch) {
+      setMentionQuery(mentionMatch[1]);
+      setMentionIndex(0);
+    } else {
+      setMentionQuery(null);
+    }
+  };
+
+  const completeMention = useCallback((username) => {
+    const el = inputRef.current;
+    if (!el) return;
+    const cursorPos = el.selectionStart;
+    const textBeforeCursor = input.slice(0, cursorPos);
+    const mentionMatch = /@(\w{0,20})$/.exec(textBeforeCursor);
+    if (!mentionMatch) return;
+    const before = textBeforeCursor.slice(0, mentionMatch.index);
+    const after = input.slice(cursorPos);
+    const newInput = `${before}@${username} ${after}`;
+    setInput(newInput);
+    setMentionQuery(null);
+    // Restore cursor after React re-render
+    const newCursor = before.length + username.length + 2; // @username + space
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(newCursor, newCursor);
+    });
+  }, [input]);
+
+  const handleMentionKeyDown = (e) => {
+    if (mentionQuery === null || mentionUsers.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setMentionIndex((prev) => (prev + 1) % mentionUsers.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setMentionIndex((prev) => (prev - 1 + mentionUsers.length) % mentionUsers.length);
+    } else if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault();
+      completeMention(mentionUsers[mentionIndex].username);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setMentionQuery(null);
+    }
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -301,7 +461,7 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
                     <ReactionPicker onSelect={reactTo} />
                   </div>
                 )}
-                <MessageContent content={msg.content} />
+                <MessageContent content={msg.content} onlineUsers={onlineUsers} onOpenDM={onOpenDM} />
                 <MessageAttachments attachments={msg.attachments} />
                 <ReactionPills reactions={msg.reactions} currentUser={currentUser} onToggle={reactTo} />
               </div>
@@ -328,14 +488,17 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <span className="font-semibold text-white hover:underline cursor-pointer leading-snug">
+                  <span
+                    className="font-semibold text-white hover:underline cursor-pointer leading-snug"
+                    onClick={() => msg.username !== currentUser && onOpenDM?.(msg.username)}
+                  >
                     {msg.username}
                   </span>
                   <span className="text-[11px] text-discord-muted">
                     {formatTimestamp(msg.timestamp)}
                   </span>
                 </div>
-                <MessageContent content={msg.content} />
+                <MessageContent content={msg.content} onlineUsers={onlineUsers} onOpenDM={onOpenDM} />
                 <MessageAttachments attachments={msg.attachments} />
                 <ReactionPills reactions={msg.reactions} currentUser={currentUser} onToggle={reactTo} />
               </div>
@@ -372,7 +535,31 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
 
       {/* Input */}
       <form onSubmit={handleSubmit} className={`px-4 pb-6 max-sm:pb-20 ${pendingImages.length > 0 ? 'pt-0' : 'pt-1'} flex-shrink-0`}>
-        <div className={`bg-discord-input flex items-center px-4 border border-transparent focus-within:border-discord-border/50 transition-colors ${pendingImages.length > 0 ? 'rounded-b-lg border-t border-white/10' : 'rounded-lg'}`}>
+        <div className={`relative bg-discord-input flex items-center px-4 border border-transparent focus-within:border-discord-border/50 transition-colors ${pendingImages.length > 0 ? 'rounded-b-lg border-t border-white/10' : 'rounded-lg'}`}>
+          {/* @mention autocomplete dropdown */}
+          {mentionQuery !== null && mentionUsers.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mb-1 bg-discord-sidebar border border-white/10 rounded-lg shadow-lg overflow-hidden z-20">
+              <div className="px-3 py-1.5 text-[11px] font-bold text-discord-muted uppercase">Members</div>
+              {mentionUsers.map((u, i) => (
+                <button
+                  key={u.username}
+                  type="button"
+                  onMouseDown={(e) => { e.preventDefault(); completeMention(u.username); }}
+                  className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-left transition-colors ${
+                    i === mentionIndex ? 'bg-discord-accent/20 text-white' : 'text-discord-text hover:bg-white/5'
+                  }`}
+                >
+                  <div
+                    className="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-white text-[10px] font-bold"
+                    style={{ backgroundColor: u.avatarColor }}
+                  >
+                    {u.username[0].toUpperCase()}
+                  </div>
+                  <span className="text-sm font-medium">{u.username}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             className="text-discord-muted hover:text-discord-text transition-colors mr-3 flex-shrink-0"
@@ -395,9 +582,11 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
             }}
           />
           <input
+            ref={inputRef}
             type="text"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
+            onKeyDown={handleMentionKeyDown}
             onPaste={handlePaste}
             placeholder={placeholder}
             maxLength={2000}

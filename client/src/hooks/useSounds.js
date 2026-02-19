@@ -123,6 +123,26 @@ const SOUNDS = {
     });
   },
 
+  mention: (ctx, vol) => {
+    const now = ctx.currentTime + 0.02;
+    const freqs = [880, 1108.73]; // A5 → C#6 (major third)
+    freqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const start = now + i * 0.12;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(vol * 0.15, start + 0.01);
+      gain.gain.setValueAtTime(vol * 0.15, start + 0.08);
+      gain.gain.linearRampToValueAtTime(0, start + 0.12);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.14);
+    });
+  },
+
   disconnect: (ctx, vol) => {
     const now = ctx.currentTime + 0.02;
     const freqs = [659.25, 523.25, 440]; // E5 → C5 → A4

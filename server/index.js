@@ -109,6 +109,14 @@ function randomAvatarColor() {
   return AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
 }
 
+function parseMentions(content) {
+  const mentions = [];
+  const regex = /@(\w{1,20})\b/g;
+  let match;
+  while ((match = regex.exec(content)) !== null) mentions.push(match[1]);
+  return [...new Set(mentions)];
+}
+
 function getAllUsersForBroadcast() {
   // Build a set of usernames with active sessions
   const activeByUsername = new Map();
@@ -331,6 +339,20 @@ io.on('connection', (socket) => {
     }
 
     io.to(channelId).emit('message:new', { channelId, message });
+
+    // Notify users not in this channel about the new message (for unread badges)
+    const mentions = parseMentions(trimmedContent);
+    for (const [sid, sess] of activeSessions) {
+      if (sid === socket.id) continue;
+      if (sess.currentChannel === channelId) continue;
+      const isMentioned = mentions.includes(sess.username);
+      io.to(sid).emit('message:notify', {
+        channelId,
+        messageId: message.id,
+        senderUsername: session.username,
+        isMentioned,
+      });
+    }
   });
 
   // ── Message Reactions ──

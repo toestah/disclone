@@ -1,4 +1,15 @@
-export default function MobileTabBar({ activeTab, onTabChange, hasVoice }) {
+export default function MobileTabBar({ activeTab, onTabChange, hasVoice, unreads }) {
+  // Compute whether any unreads/mentions exist across all channels
+  let hasUnreads = false;
+  let hasMentionUnreads = false;
+  if (unreads) {
+    for (const [, val] of unreads) {
+      if (val.count > 0) hasUnreads = true;
+      if (val.hasMention) hasMentionUnreads = true;
+      if (hasMentionUnreads) break;
+    }
+  }
+
   const tabs = [
     {
       id: 'channels',
@@ -53,20 +64,29 @@ export default function MobileTabBar({ activeTab, onTabChange, hasVoice }) {
 
   return (
     <div className="fixed bottom-0 left-0 right-0 h-14 bg-discord-dark border-t border-black/40 flex items-stretch sm:hidden z-50 safe-area-pb">
-      {tabs.map((tab) => (
-        <button
-          key={tab.id}
-          onClick={() => onTabChange(tab.id)}
-          className={`flex-1 flex flex-col items-center justify-center gap-0.5 transition-colors ${
-            activeTab === tab.id
-              ? 'text-white'
-              : 'text-discord-muted'
-          }`}
-        >
-          {tab.icon}
-          <span className="text-[10px] font-medium">{tab.label}</span>
-        </button>
-      ))}
+      {tabs.map((tab) => {
+        const showDot = (tab.id === 'chat' || tab.id === 'channels') && hasUnreads;
+        const dotColor = showDot && hasMentionUnreads ? 'bg-discord-red' : 'bg-white';
+        return (
+          <button
+            key={tab.id}
+            onClick={() => onTabChange(tab.id)}
+            className={`flex-1 flex flex-col items-center justify-center gap-0.5 transition-colors ${
+              activeTab === tab.id
+                ? 'text-white'
+                : 'text-discord-muted'
+            }`}
+          >
+            <div className="relative">
+              {tab.icon}
+              {showDot && (
+                <div className={`absolute -top-1 -right-1.5 w-2.5 h-2.5 rounded-full ${dotColor} border-2 border-discord-dark`} />
+              )}
+            </div>
+            <span className="text-[10px] font-medium">{tab.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

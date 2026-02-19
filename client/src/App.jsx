@@ -32,12 +32,33 @@ function AppContent() {
   const isReconnectRef = useRef(false);
   useEffect(() => { voiceChannelRef.current = voiceChannel; }, [voiceChannel]);
 
+  // Unread tracking: Map<channelId, { count, hasMention }>
+  const [unreads, setUnreads] = useState(() => {
+    try {
+      const saved = localStorage.getItem('disclone_unreads');
+      return saved ? new Map(JSON.parse(saved)) : new Map();
+    } catch { return new Map(); }
+  });
+
   // DM state
   const [dmChannels, setDmChannels] = useState([]);
   const [activeDM, setActiveDM] = useState(null); // null = text channel, dmChannelId = DM view
 
   // Mobile tab state
   const [mobileTab, setMobileTab] = useState('chat');
+
+  // Refs for use inside socket event closures
+  const activeChannelRef = useRef(activeChannel);
+  const activeDMRef = useRef(activeDM);
+  const userRef = useRef(user);
+  useEffect(() => { activeChannelRef.current = activeChannel; }, [activeChannel]);
+  useEffect(() => { activeDMRef.current = activeDM; }, [activeDM]);
+  useEffect(() => { userRef.current = user; }, [user]);
+
+  // Persist unreads to localStorage
+  useEffect(() => {
+    localStorage.setItem('disclone_unreads', JSON.stringify([...unreads]));
+  }, [unreads]);
 
   // Auto-login from localStorage when socket connects
   useEffect(() => {
@@ -77,6 +98,13 @@ function AppContent() {
                 });
               }
             });
+            // Clear unreads for general on login
+            setUnreads((prev) => {
+              if (!prev.has('general')) return prev;
+              const next = new Map(prev);
+              next.delete('general');
+              return next;
+            });
             // Auto-rejoin voice channel on reconnect
             if (isReconnectRef.current && voiceChannelRef.current) {
               const savedVC = voiceChannelRef.current;
@@ -105,6 +133,22 @@ function AppContent() {
         next.set(channelId, [...existing, message]);
         return next;
       });
+      // Track unreads if user is not viewing this channel
+      const viewingThis = !activeDMRef.current && activeChannelRef.current === channelId;
+      if (!viewingThis && userRef.current && message.username !== userRef.current.username) {
+        const mentionRegex = new RegExp(`@${userRef.current.username}\\b`);
+        const isMentioned = mentionRegex.test(message.content || '');
+        setUnreads((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(channelId) || { count: 0, hasMention: false };
+          next.set(channelId, {
+            count: existing.count + 1,
+            hasMention: existing.hasMention || isMentioned,
+          });
+          return next;
+        });
+        if (isMentioned) sounds.play('mention');
+      }
     };
 
     const handleVoiceRoomUpdate = ({ channelId, members }) => {
@@ -115,6 +159,19 @@ function AppContent() {
       });
     };
 
+    const handleMessageNotify = ({ channelId, isMentioned }) => {
+      setUnreads((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(channelId) || { count: 0, hasMention: false };
+        next.set(channelId, {
+          count: existing.count + 1,
+          hasMention: existing.hasMention || isMentioned,
+        });
+        return next;
+      });
+      if (isMentioned) sounds.play('mention');
+    };
+
     const handleDMNew = ({ dmChannelId, message }) => {
       setMessages((prev) => {
         const next = new Map(prev);
@@ -122,6 +179,19 @@ function AppContent() {
         next.set(dmChannelId, [...existing, message]);
         return next;
       });
+      // Track DM unreads — always mention-level
+      if (activeDMRef.current !== dmChannelId && userRef.current && message.username !== userRef.current.username) {
+        setUnreads((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(dmChannelId) || { count: 0, hasMention: false };
+          next.set(dmChannelId, {
+            count: existing.count + 1,
+            hasMention: true,
+          });
+          return next;
+        });
+        sounds.play('mention');
+      }
     };
 
     const handleReaction = ({ channelId, messageId, reactions }) => {
@@ -150,6 +220,7 @@ function AppContent() {
     socket.on('message:new', handleNewMessage);
     socket.on('message:reaction', handleReaction);
     socket.on('voice:room-update', handleVoiceRoomUpdate);
+    socket.on('message:notify', handleMessageNotify);
     socket.on('dm:new', handleDMNew);
     socket.on('dm:opened', handleDMOpened);
 
@@ -158,10 +229,11 @@ function AppContent() {
       socket.off('message:new', handleNewMessage);
       socket.off('message:reaction', handleReaction);
       socket.off('voice:room-update', handleVoiceRoomUpdate);
+      socket.off('message:notify', handleMessageNotify);
       socket.off('dm:new', handleDMNew);
       socket.off('dm:opened', handleDMOpened);
     };
-  }, [socket]);
+  }, [socket, sounds]);
 
   const handleLogin = useCallback(
     (username, password) => {
@@ -199,6 +271,13 @@ function AppContent() {
               });
             }
           });
+          // Clear unreads for general on login
+          setUnreads((prev) => {
+            if (!prev.has('general')) return prev;
+            const next = new Map(prev);
+            next.delete('general');
+            return next;
+          });
         } else {
           setLoginError(response.error);
         }
@@ -216,6 +295,12 @@ function AppContent() {
       setActiveDM(null); // clear DM view
       setActiveChannel(channelId);
       setMobileTab('chat');
+      setUnreads((prev) => {
+        if (!prev.has(channelId)) return prev;
+        const next = new Map(prev);
+        next.delete(channelId);
+        return next;
+      });
       socket.emit('channel:join', { channelId }, (response) => {
         if (response?.success) {
           setMessages((prev) => {
@@ -269,6 +354,12 @@ function AppContent() {
       if (!socket) return;
       setActiveDM(dmChannelId);
       setMobileTab('chat');
+      setUnreads((prev) => {
+        if (!prev.has(dmChannelId)) return prev;
+        const next = new Map(prev);
+        next.delete(dmChannelId);
+        return next;
+      });
       // Fetch latest messages
       socket.emit('dm:join', { dmChannelId }, (response) => {
         if (response?.success) {
@@ -315,6 +406,8 @@ function AppContent() {
     setActiveDM(null);
     setDmChannels([]);
     setLoginError('');
+    setUnreads(new Map());
+    localStorage.removeItem('disclone_unreads');
     if (socket) {
       socket.connect();
     }
@@ -391,6 +484,9 @@ function AppContent() {
           dmChannels={dmChannels}
           activeDM={activeDM}
           onDMSelect={handleDMSelect}
+          onOpenDM={handleOpenDM}
+          onlineUsers={onlineUsers}
+          unreads={unreads}
         />
       </div>
 
@@ -420,6 +516,8 @@ function AppContent() {
             onSendMessage={handleSendDM}
             onReact={handleReact}
             currentUser={user.username}
+            onlineUsers={onlineUsers}
+            onOpenDM={handleOpenDM}
             isDM
             dmTarget={activeDMInfo.username}
           />
@@ -432,6 +530,8 @@ function AppContent() {
               onSendMessage={handleSendMessage}
               onReact={handleReact}
               currentUser={user.username}
+              onlineUsers={onlineUsers}
+              onOpenDM={handleOpenDM}
             />
           )
         )}
@@ -488,6 +588,7 @@ function AppContent() {
         activeTab={effectiveMobileTab}
         onTabChange={setMobileTab}
         hasVoice={!!voiceChannel}
+        unreads={unreads}
       />
     </div>
   );

@@ -1,4 +1,154 @@
+import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import JukeboxCard from './JukeboxCard.jsx';
+
+function UnreadBadge({ count, hasMention }) {
+  const display = count > 99 ? '99+' : count;
+  return (
+    <span className={`ml-auto px-1.5 min-w-[18px] h-[18px] flex items-center justify-center rounded-full text-[11px] font-bold leading-none ${
+      hasMention ? 'bg-discord-red text-white' : 'bg-discord-muted/60 text-white'
+    }`}>
+      {display}
+    </span>
+  );
+}
+
+function DMSection({ dmChannels, activeDM, onDMSelect, onOpenDM, onlineUsers, user, unreads }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const searchRef = useRef(null);
+
+  // Close on Escape
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const handler = (e) => { if (e.key === 'Escape') { setPickerOpen(false); setSearch(''); } };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [pickerOpen]);
+
+  // Focus search input when modal opens
+  useEffect(() => {
+    if (pickerOpen) requestAnimationFrame(() => searchRef.current?.focus());
+  }, [pickerOpen]);
+
+  const closePicker = () => { setPickerOpen(false); setSearch(''); };
+
+  // Filter users: exclude self, filter by search
+  const existingDMUsernames = new Set(dmChannels?.map((d) => d.username) || []);
+  const candidates = (onlineUsers || [])
+    .filter((u) => u.username !== user?.username)
+    .filter((u) => !search || u.username.toLowerCase().includes(search.toLowerCase()))
+    .slice(0, 12);
+
+  return (
+    <>
+      <div className="px-1.5 mb-1 mt-4 flex items-center justify-between">
+        <span className="text-[11px] font-bold text-discord-muted uppercase tracking-wide">
+          Direct Messages
+        </span>
+        <button
+          onClick={() => { setPickerOpen(true); setSearch(''); }}
+          className="text-discord-muted hover:text-discord-text transition-colors p-0.5"
+          title="New Direct Message"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+          </svg>
+        </button>
+      </div>
+
+      {/* New DM modal — portaled to body to escape sidebar stacking context */}
+      {pickerOpen && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={closePicker}>
+          <div className="absolute inset-0 bg-black/60" />
+          <div
+            className="relative w-[90vw] max-w-sm bg-discord-darker rounded-xl shadow-2xl border border-white/10 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 pt-4 pb-2">
+              <h3 className="text-white font-bold text-base mb-1">New Direct Message</h3>
+              <p className="text-discord-muted text-xs mb-3">Select a user to start a conversation.</p>
+              <input
+                ref={searchRef}
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search users..."
+                className="w-full bg-discord-dark text-discord-text text-sm rounded-lg px-3 py-2 outline-none placeholder:text-discord-muted/50 border border-white/5 focus:border-discord-accent/40"
+              />
+            </div>
+            <div className="max-h-60 overflow-y-auto px-2 py-1">
+              {candidates.length === 0 && (
+                <div className="px-3 py-4 text-sm text-discord-muted text-center">No users found</div>
+              )}
+              {candidates.map((u) => (
+                <button
+                  key={u.username}
+                  onClick={() => { onOpenDM?.(u.username); closePicker(); }}
+                  className="w-full flex items-center gap-3 px-3 py-2 text-left rounded-lg hover:bg-white/5 transition-colors"
+                >
+                  <div className="relative flex-shrink-0">
+                    <div
+                      className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold"
+                      style={{ backgroundColor: u.avatarColor }}
+                    >
+                      {u.username[0].toUpperCase()}
+                    </div>
+                    <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-discord-darker ${
+                      u.status === 'online' ? 'bg-discord-green' : u.status === 'away' ? 'bg-yellow-400' : u.status === 'busy' ? 'bg-discord-red' : 'bg-discord-muted/50'
+                    }`} />
+                  </div>
+                  <span className="text-sm text-discord-text font-medium truncate">{u.username}</span>
+                  {existingDMUsernames.has(u.username) && (
+                    <span className="ml-auto text-[10px] text-discord-muted bg-white/5 px-1.5 py-0.5 rounded-full">opened</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="px-4 py-3 border-t border-white/5">
+              <button
+                onClick={closePicker}
+                className="w-full py-2 text-sm text-discord-muted hover:text-discord-text transition-colors rounded-lg hover:bg-white/5"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+      {dmChannels && dmChannels.length > 0 && (
+        <div className="space-y-px mb-4">
+          {dmChannels.map((dm) => {
+            const unread = unreads?.get(dm.id);
+            return (
+              <button
+                key={dm.id}
+                onClick={() => onDMSelect?.(dm.id)}
+                className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
+                  activeDM === dm.id
+                    ? 'bg-discord-active text-white'
+                    : unread
+                      ? 'text-white hover:bg-discord-hover'
+                      : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+                }`}
+              >
+                <div
+                  className="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-white text-[10px] font-bold"
+                  style={{ backgroundColor: dm.avatarColor }}
+                >
+                  {dm.username[0].toUpperCase()}
+                </div>
+                <span className={`text-[15px] truncate ${unread ? 'font-bold' : 'font-medium'}`}>{dm.username}</span>
+                {unread && <UnreadBadge count={unread.count} hasMention={unread.hasMention} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function Sidebar({
   channels,
@@ -14,6 +164,9 @@ export default function Sidebar({
   dmChannels,
   activeDM,
   onDMSelect,
+  onOpenDM,
+  onlineUsers,
+  unreads,
 }) {
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
@@ -41,20 +194,26 @@ export default function Sidebar({
           </span>
         </div>
         <div className="space-y-px mb-4">
-          {textChannels.map((channel) => (
-            <button
-              key={channel.id}
-              onClick={() => onChannelSelect(channel.id)}
-              className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
-                activeChannel === channel.id
-                  ? 'bg-discord-active text-white'
-                  : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
-              }`}
-            >
-              <span className={`text-lg leading-none font-light ${activeChannel === channel.id ? 'text-white/70' : 'text-discord-muted/50'}`}>#</span>
-              <span className="text-[15px] font-medium">{channel.name}</span>
-            </button>
-          ))}
+          {textChannels.map((channel) => {
+            const unread = unreads?.get(channel.id);
+            return (
+              <button
+                key={channel.id}
+                onClick={() => onChannelSelect(channel.id)}
+                className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
+                  activeChannel === channel.id
+                    ? 'bg-discord-active text-white'
+                    : unread
+                      ? 'text-white hover:bg-discord-hover'
+                      : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+                }`}
+              >
+                <span className={`text-lg leading-none font-light ${activeChannel === channel.id ? 'text-white/70' : 'text-discord-muted/50'}`}>#</span>
+                <span className={`text-[15px] ${unread ? 'font-bold' : 'font-medium'}`}>{channel.name}</span>
+                {unread && <UnreadBadge count={unread.count} hasMention={unread.hasMention} />}
+              </button>
+            );
+          })}
         </div>
 
         {/* Voice channels */}
@@ -145,36 +304,15 @@ export default function Sidebar({
         </div>
 
         {/* Direct Messages */}
-        {dmChannels && dmChannels.length > 0 && (
-          <>
-            <div className="px-1.5 mb-1 mt-4">
-              <span className="text-[11px] font-bold text-discord-muted uppercase tracking-wide">
-                Direct Messages
-              </span>
-            </div>
-            <div className="space-y-px mb-4">
-              {dmChannels.map((dm) => (
-                <button
-                  key={dm.id}
-                  onClick={() => onDMSelect?.(dm.id)}
-                  className={`w-full text-left px-2 py-1.5 rounded flex items-center gap-2 transition-colors group ${
-                    activeDM === dm.id
-                      ? 'bg-discord-active text-white'
-                      : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
-                  }`}
-                >
-                  <div
-                    className="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-white text-[10px] font-bold"
-                    style={{ backgroundColor: dm.avatarColor }}
-                  >
-                    {dm.username[0].toUpperCase()}
-                  </div>
-                  <span className="text-[15px] font-medium truncate">{dm.username}</span>
-                </button>
-              ))}
-            </div>
-          </>
-        )}
+        <DMSection
+          dmChannels={dmChannels}
+          activeDM={activeDM}
+          onDMSelect={onDMSelect}
+          onOpenDM={onOpenDM}
+          onlineUsers={onlineUsers}
+          user={user}
+          unreads={unreads}
+        />
       </div>
 
       {/* Voice connection panel — shown when in a voice channel */}
