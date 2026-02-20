@@ -85,6 +85,10 @@ This is the most complex part of the codebase. Voice uses WebRTC peer connection
 
 Context-based singleton. Uses `.jsx` extension (required — esbuild loader needs it for JSX). Auto-reconnect with 5 attempts.
 
+## Screenshots
+
+When taking Playwright screenshots, always save them to the `screenshots/` directory (gitignored). Use descriptive filenames, e.g. `screenshots/mobile-chat-layout.png`. Never save screenshots to the repo root or other directories.
+
 ## Key Conventions
 
 - **Tailwind CSS v4**: Uses `@tailwindcss/vite` plugin — no `tailwind.config.js` or `postcss.config.js`. Custom theme colors defined via `@theme` directive in `index.css`. Never add unlayered `* { margin/padding: 0 }` resets — they override all Tailwind utilities since Tailwind v4 uses `@layer`.
