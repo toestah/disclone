@@ -90,6 +90,11 @@ const musicSharers = new Map();
 // Screen sharers: channelId -> { socketId, username } (one sharer per room)
 const screenSharers = new Map();
 
+// Camera users: channelId -> Set<socketId> (multiple users can have cameras on)
+const cameraUsers = new Map();
+cameraUsers.set('voice-chat-1', new Set());
+cameraUsers.set('voice-chat-2', new Set());
+
 // DM channels: username -> Set<dmChannelId>
 const userDMChannels = new Map();
 
@@ -171,6 +176,7 @@ function getVoiceRoomMembers(channelId) {
         speaking: speakingState.get(socketId) || false,
         muted: mutedState.get(socketId) || false,
         screenSharing: screenSharers.get(channelId)?.socketId === socketId,
+        cameraOn: cameraUsers.get(channelId)?.has(socketId) || false,
       });
     }
   }
@@ -470,7 +476,24 @@ io.on('connection', (socket) => {
       }
     }
 
-    callback?.({ success: true, peers: existingPeers, musicSharer, screenSharer });
+    // Include camera users so late joiners know who has camera on
+    const activeCameraUsers = [];
+    const cameraSet = cameraUsers.get(channelId);
+    if (cameraSet) {
+      for (const camSocketId of cameraSet) {
+        if (camSocketId !== socket.id) {
+          const camSession = activeSessions.get(camSocketId);
+          if (camSession) {
+            activeCameraUsers.push({
+              socketId: camSocketId,
+              username: camSession.username,
+            });
+          }
+        }
+      }
+    }
+
+    callback?.({ success: true, peers: existingPeers, musicSharer, screenSharer, cameraUsers: activeCameraUsers });
 
     io.emit('voice:room-update', {
       channelId,
@@ -498,6 +521,16 @@ io.on('connection', (socket) => {
       if (screenSharers.get(channelId)?.socketId === socket.id) {
         screenSharers.delete(channelId);
         socket.to(`voice:${channelId}`).emit('screen:stopped', {
+          channelId,
+          socketId: socket.id,
+        });
+      }
+
+      // Clean up camera if this user had camera on
+      const camSet = cameraUsers.get(channelId);
+      if (camSet && camSet.has(socket.id)) {
+        camSet.delete(socket.id);
+        socket.to(`voice:${channelId}`).emit('camera:user-stopped', {
           channelId,
           socketId: socket.id,
         });
@@ -715,6 +748,73 @@ io.on('connection', (socket) => {
     io.to(targetId).emit('screen:ice-candidate', { from: socket.id, candidate });
   });
 
+  // ── Camera (Video) ──
+
+  socket.on('camera:start', ({ channelId }, callback) => {
+    const session = activeSessions.get(socket.id);
+    if (!session) return callback?.({ success: false, error: 'Not logged in' });
+
+    const room = voiceRooms.get(channelId);
+    if (!room || !room.has(socket.id)) {
+      return callback?.({ success: false, error: 'Not in this voice channel' });
+    }
+
+    const camSet = cameraUsers.get(channelId);
+    camSet.add(socket.id);
+
+    socket.to(`voice:${channelId}`).emit('camera:user-started', {
+      channelId,
+      socketId: socket.id,
+      username: session.username,
+    });
+    callback?.({ success: true });
+
+    io.emit('voice:room-update', {
+      channelId,
+      members: getVoiceRoomMembers(channelId),
+    });
+  });
+
+  socket.on('camera:stop', ({ channelId }) => {
+    const camSet = cameraUsers.get(channelId);
+    if (!camSet || !camSet.has(socket.id)) return;
+    camSet.delete(socket.id);
+
+    socket.to(`voice:${channelId}`).emit('camera:user-stopped', {
+      channelId,
+      socketId: socket.id,
+    });
+
+    io.emit('voice:room-update', {
+      channelId,
+      members: getVoiceRoomMembers(channelId),
+    });
+  });
+
+  socket.on('camera:offer', ({ targetId, offer }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('camera:offer', { from: socket.id, offer });
+  });
+
+  socket.on('camera:answer', ({ targetId, answer }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('camera:answer', { from: socket.id, answer });
+  });
+
+  socket.on('camera:ice-candidate', ({ targetId, candidate }) => {
+    const room = findPeerVoiceRoom(socket.id);
+    if (!room) return;
+    const targetRoom = findPeerVoiceRoom(targetId);
+    if (room !== targetRoom) return;
+    io.to(targetId).emit('camera:ice-candidate', { from: socket.id, candidate });
+  });
+
   // ── Direct Messages ──
 
   socket.on('dm:open', ({ targetUsername }, callback) => {
@@ -865,6 +965,16 @@ io.on('connection', (socket) => {
         if (screenSharers.get(roomId)?.socketId === socket.id) {
           screenSharers.delete(roomId);
           socket.to(`voice:${roomId}`).emit('screen:stopped', {
+            channelId: roomId,
+            socketId: socket.id,
+          });
+        }
+
+        // Clean up camera if this user had camera on
+        const camSet = cameraUsers.get(roomId);
+        if (camSet && camSet.has(socket.id)) {
+          camSet.delete(socket.id);
+          socket.to(`voice:${roomId}`).emit('camera:user-stopped', {
             channelId: roomId,
             socketId: socket.id,
           });

@@ -10,6 +10,7 @@ import MobileTabBar from './components/MobileTabBar.jsx';
 import MobileVoiceView from './components/MobileVoiceView.jsx';
 import MobileProfileView from './components/MobileProfileView.jsx';
 import ScreenViewer from './components/ScreenViewer.jsx';
+import VideoGrid from './components/VideoGrid.jsx';
 
 function AppContent() {
   const { socket, connected } = useSocket();
@@ -534,6 +535,17 @@ function AppContent() {
               onOpenDM={handleOpenDM}
             />
           )
+        )}
+
+        {/* Video grid overlay — shown when cameras active and not watching screen share */}
+        {voiceChannel && !voiceState.screenStream && (voiceState.isCameraOn || voiceState.cameraStreams.size > 0) && (
+          <VideoGrid
+            cameraStreams={voiceState.cameraStreams}
+            localCameraStream={voiceState.cameraStreamRef?.current}
+            user={user}
+            voiceMembers={voiceMembers}
+            isMuted={voiceState.isMuted}
+          />
         )}
 
         {/* Screen viewer overlay */}

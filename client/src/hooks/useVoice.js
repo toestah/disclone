@@ -131,6 +131,11 @@ export default function useVoice(channelId, playSound) {
   const [screenSharer, setScreenSharer] = useState(null); // { socketId, username } | null
   const [screenStream, setScreenStream] = useState(null); // remote MediaStream for viewer
 
+  // Camera state
+  const [isCameraOn, setIsCameraOn] = useState(false);
+  const [cameraStreams, setCameraStreams] = useState(new Map()); // peerId → MediaStream
+  const [cameraUsers, setCameraUsers] = useState(new Set());
+
   // ── Refs ──
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -176,6 +181,13 @@ export default function useVoice(channelId, playSound) {
   const isScreenSharingRef = useRef(false);
   const stopScreenSharingRef = useRef(null);
 
+  // Camera refs
+  const cameraPCsRef = useRef(new Map()); // peerId → RTCPeerConnection
+  const cameraStreamRef = useRef(null); // local getUserMedia video stream
+  const isCameraOnRef = useRef(false);
+  const stopCameraRef = useRef(null);
+  const createCameraOfferRef = useRef(null);
+
   // Keep refs in sync
   channelIdRef.current = channelId;
   isMutedRef.current = isMuted;
@@ -184,6 +196,7 @@ export default function useVoice(channelId, playSound) {
   noiseSuppressionRef.current = noiseSuppression;
   sensitivityModeRef.current = sensitivityMode;
   isScreenSharingRef.current = isScreenSharing;
+  isCameraOnRef.current = isCameraOn;
 
   const setSensitivity = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
@@ -734,6 +747,193 @@ export default function useVoice(channelId, playSound) {
       }
     }
 
+    // ── Camera (video) helpers ──
+
+    function closeCameraPC(peerId) {
+      const pc = cameraPCsRef.current.get(peerId);
+      if (pc) {
+        pc.onicecandidate = null;
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.close();
+        cameraPCsRef.current.delete(peerId);
+      }
+      setCameraStreams((prev) => {
+        if (!prev.has(peerId)) return prev;
+        const next = new Map(prev);
+        next.delete(peerId);
+        return next;
+      });
+    }
+
+    function closeAllCameraPCs() {
+      for (const [peerId] of cameraPCsRef.current) {
+        closeCameraPC(peerId);
+      }
+      cameraPCsRef.current.clear();
+      setCameraStreams(new Map());
+    }
+
+    function createCameraOfferTo(targetId) {
+      closeCameraPC(targetId);
+      const stream = cameraStreamRef.current;
+      if (!stream) return;
+
+      const pc = new RTCPeerConnection(iceConfig);
+      cameraPCsRef.current.set(targetId, pc);
+
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          socket.emit('camera:ice-candidate', {
+            targetId,
+            candidate: e.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.ontrack = (e) => {
+        const remoteStream = e.streams[0] || new MediaStream([e.track]);
+        setCameraStreams((prev) => {
+          const next = new Map(prev);
+          next.set(targetId, remoteStream);
+          return next;
+        });
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === 'failed' || state === 'disconnected') {
+          closeCameraPC(targetId);
+        }
+      };
+
+      pc.createOffer().then((offer) => {
+        return pc.setLocalDescription(offer);
+      }).then(() => {
+        socket.emit('camera:offer', {
+          targetId,
+          offer: pc.localDescription.toJSON(),
+        });
+        // Limit video bitrate to 1.5 Mbps
+        for (const sender of pc.getSenders()) {
+          if (sender.track?.kind === 'video') {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = 1_500_000;
+            sender.setParameters(params).catch(() => {});
+          }
+        }
+      }).catch((e) => {
+        console.error('[Camera] createOffer error:', e);
+      });
+    }
+
+    createCameraOfferRef.current = createCameraOfferTo;
+
+    async function handleCameraRemoteOffer(fromId, offer) {
+      closeCameraPC(fromId);
+
+      const pc = new RTCPeerConnection(iceConfig);
+      cameraPCsRef.current.set(fromId, pc);
+
+      // Add own camera tracks if we also have camera on (bidirectional)
+      const localStream = cameraStreamRef.current;
+      if (localStream) {
+        for (const track of localStream.getTracks()) {
+          pc.addTrack(track, localStream);
+        }
+      }
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          socket.emit('camera:ice-candidate', {
+            targetId: fromId,
+            candidate: e.candidate.toJSON(),
+          });
+        }
+      };
+
+      pc.ontrack = (e) => {
+        const remoteStream = e.streams[0] || new MediaStream([e.track]);
+        setCameraStreams((prev) => {
+          const next = new Map(prev);
+          next.set(fromId, remoteStream);
+          return next;
+        });
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === 'failed' || state === 'disconnected') {
+          closeCameraPC(fromId);
+        }
+      };
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('camera:answer', {
+          targetId: fromId,
+          answer: pc.localDescription.toJSON(),
+        });
+        // Limit video bitrate to 1.5 Mbps
+        for (const sender of pc.getSenders()) {
+          if (sender.track?.kind === 'video') {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = 1_500_000;
+            sender.setParameters(params).catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.error('[Camera] handleRemoteOffer error:', e);
+      }
+    }
+
+    // ── Camera event handlers ──
+
+    function handleCameraUserStarted({ socketId, username }) {
+      setCameraUsers((prev) => {
+        const next = new Set(prev);
+        next.add(socketId);
+        return next;
+      });
+    }
+
+    function handleCameraUserStopped({ socketId }) {
+      setCameraUsers((prev) => {
+        const next = new Set(prev);
+        next.delete(socketId);
+        return next;
+      });
+      closeCameraPC(socketId);
+    }
+
+    function handleCameraOffer({ from, offer }) {
+      handleCameraRemoteOffer(from, offer);
+    }
+
+    function handleCameraAnswer({ from, answer }) {
+      const pc = cameraPCsRef.current.get(from);
+      if (!pc) return;
+      pc.setRemoteDescription(new RTCSessionDescription(answer)).catch((e) => {
+        console.error('[Camera] setRemoteDescription(answer) error:', e);
+      });
+    }
+
+    function handleCameraIceCandidate({ from, candidate }) {
+      const pc = cameraPCsRef.current.get(from);
+      if (!pc) return;
+      if (candidate) {
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      }
+    }
+
     // ── Register signaling listeners BEFORE voice:join ──
     socket.on('webrtc:offer', handleOffer);
     socket.on('webrtc:answer', handleAnswer);
@@ -751,6 +951,11 @@ export default function useVoice(channelId, playSound) {
     socket.on('screen:offer', handleScreenOffer);
     socket.on('screen:answer', handleScreenAnswer);
     socket.on('screen:ice-candidate', handleScreenIceCandidate);
+    socket.on('camera:user-started', handleCameraUserStarted);
+    socket.on('camera:user-stopped', handleCameraUserStopped);
+    socket.on('camera:offer', handleCameraOffer);
+    socket.on('camera:answer', handleCameraAnswer);
+    socket.on('camera:ice-candidate', handleCameraIceCandidate);
 
     // ── Init ──
 
@@ -788,6 +993,11 @@ export default function useVoice(channelId, playSound) {
       // Show screen sharer if someone is already sharing screen
       if (joinResponse?.screenSharer) {
         setScreenSharer(joinResponse.screenSharer);
+      }
+
+      // Track existing camera users
+      if (joinResponse?.cameraUsers?.length > 0) {
+        setCameraUsers(new Set(joinResponse.cameraUsers.map((u) => u.socketId)));
       }
 
       try {
@@ -1110,6 +1320,11 @@ export default function useVoice(channelId, playSound) {
       socket.off('screen:offer', handleScreenOffer);
       socket.off('screen:answer', handleScreenAnswer);
       socket.off('screen:ice-candidate', handleScreenIceCandidate);
+      socket.off('camera:user-started', handleCameraUserStarted);
+      socket.off('camera:user-stopped', handleCameraUserStopped);
+      socket.off('camera:offer', handleCameraOffer);
+      socket.off('camera:answer', handleCameraAnswer);
+      socket.off('camera:ice-candidate', handleCameraIceCandidate);
 
       // Clean up screen sharing if active
       if (isScreenSharingRef.current) {
@@ -1124,6 +1339,19 @@ export default function useVoice(channelId, playSound) {
       closeAllScreenPCs();
       setScreenSharer(null);
       setScreenStream(null);
+
+      // Clean up camera if active
+      if (isCameraOnRef.current) {
+        socket.emit('camera:stop', { channelId });
+        setIsCameraOn(false);
+        isCameraOnRef.current = false;
+      }
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
+      }
+      closeAllCameraPCs();
+      setCameraUsers(new Set());
 
       // Clean up music sharing if active
       if (isSharingRef.current) {
@@ -1546,6 +1774,76 @@ export default function useVoice(channelId, playSound) {
     setScreenStream(null);
   }, []);
 
+  // ── Camera (video) callbacks ──
+
+  const cameraSupported = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
+
+  const startCamera = useCallback(async () => {
+    if (!socket || !channelIdRef.current || isCameraOnRef.current) return;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
+      });
+    } catch (err) {
+      if (err.name === 'NotAllowedError') return;
+      console.error('[Camera] getUserMedia error:', err);
+      return;
+    }
+
+    cameraStreamRef.current = stream;
+
+    socket.emit('camera:start', { channelId: channelIdRef.current }, (response) => {
+      if (!response?.success) {
+        alert(response?.error || 'Could not start camera');
+        stream.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
+        return;
+      }
+      setIsCameraOn(true);
+      isCameraOnRef.current = true;
+
+      // Create offers to all peers in the room that have camera on
+      // (also offer to all peers so they can see us even if their camera is off)
+      const voiceRoom = peerConnectionsRef.current;
+      for (const [peerId] of voiceRoom) {
+        createCameraOfferRef.current?.(peerId);
+      }
+    });
+
+    // Stop camera if video track ends (e.g., browser UI or permission revocation)
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.addEventListener('ended', () => {
+        stopCameraRef.current?.();
+      });
+    }
+  }, [socket]);
+
+  const stopCamera = useCallback(() => {
+    if (!socket) return;
+    socket.emit('camera:stop', { channelId: channelIdRef.current });
+
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+      cameraStreamRef.current = null;
+    }
+    for (const [, pc] of cameraPCsRef.current) {
+      pc.onicecandidate = null;
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+      pc.close();
+    }
+    cameraPCsRef.current.clear();
+    setCameraStreams(new Map());
+
+    setIsCameraOn(false);
+    isCameraOnRef.current = false;
+  }, [socket]);
+
+  stopCameraRef.current = stopCamera;
+
   const setMusicVolume = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
     setMusicVolumeState(v);
@@ -1597,5 +1895,12 @@ export default function useVoice(channelId, playSound) {
     watchScreen,
     stopWatching,
     screenShareSupported,
+    isCameraOn,
+    cameraStreams,
+    cameraUsers,
+    cameraStreamRef,
+    startCamera,
+    stopCamera,
+    cameraSupported,
   };
 }
