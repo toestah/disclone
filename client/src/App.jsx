@@ -545,6 +545,8 @@ function AppContent() {
             user={user}
             voiceMembers={voiceMembers}
             isMuted={voiceState.isMuted}
+            activeEffect={voiceState.activeEffect}
+            onSetVideoEffect={voiceState.setVideoEffect}
           />
         )}
 

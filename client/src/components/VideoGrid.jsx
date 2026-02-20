@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import VideoEffectsPanel from './VideoEffectsPanel.jsx';
 
 function VideoTile({ stream, username, avatarColor, isSelf, isMuted }) {
   const videoRef = useRef(null);
@@ -44,11 +45,15 @@ function VideoTile({ stream, username, avatarColor, isSelf, isMuted }) {
   );
 }
 
-export default function VideoGrid({ cameraStreams, localCameraStream, user, voiceMembers, isMuted }) {
+export default function VideoGrid({ cameraStreams, localCameraStream, user, voiceMembers, isMuted, activeEffect, onSetVideoEffect }) {
+  const [showEffects, setShowEffects] = useState(false);
+  const [effectsAnchorRect, setEffectsAnchorRect] = useState(null);
+  const effectsBtnRef = useRef(null);
   const totalTiles = (localCameraStream ? 1 : 0) + cameraStreams.size;
   if (totalTiles === 0) return null;
 
   const gridCols = totalTiles <= 1 ? 'grid-cols-1' : totalTiles <= 4 ? 'grid-cols-2' : 'grid-cols-3';
+  const hasActiveEffect = activeEffect && activeEffect !== 'none';
 
   // Build member lookup from voiceMembers (flat array across all rooms)
   const memberLookup = new Map();
@@ -70,6 +75,26 @@ export default function VideoGrid({ cameraStreams, localCameraStream, user, voic
         <span className="text-discord-muted text-xs">
           {totalTiles} camera{totalTiles !== 1 ? 's' : ''}
         </span>
+        {localCameraStream && onSetVideoEffect && (
+          <button
+            ref={effectsBtnRef}
+            onClick={() => {
+              setEffectsAnchorRect(effectsBtnRef.current?.getBoundingClientRect());
+              setShowEffects((v) => !v);
+            }}
+            className={`ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+              hasActiveEffect
+                ? 'bg-discord-brand/20 text-discord-brand hover:bg-discord-brand/30'
+                : 'bg-white/5 text-discord-muted hover:bg-white/10 hover:text-white'
+            }`}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+            </svg>
+            {hasActiveEffect ? 'Effects On' : 'Effects'}
+          </button>
+        )}
       </div>
       <div className={`flex-1 overflow-auto p-4 grid ${gridCols} gap-3 auto-rows-fr content-center`}>
         {localCameraStream && (
@@ -95,6 +120,16 @@ export default function VideoGrid({ cameraStreams, localCameraStream, user, voic
           );
         })}
       </div>
+      {showEffects && (
+        <VideoEffectsPanel
+          activeEffect={activeEffect}
+          onEffectChange={(key) => {
+            onSetVideoEffect(key);
+          }}
+          onClose={() => setShowEffects(false)}
+          anchorRect={effectsAnchorRect}
+        />
+      )}
     </div>
   );
 }

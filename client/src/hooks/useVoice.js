@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSocket } from './useSocket.jsx';
 import { loadRnnoise, RnnoiseDenoiser } from '../lib/rnnoise.js';
+import { VideoEffectsProcessor, EFFECT_PRESETS } from '../lib/videoEffects.js';
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -136,6 +137,12 @@ export default function useVoice(channelId, playSound) {
   const [cameraStreams, setCameraStreams] = useState(new Map()); // peerId → MediaStream
   const [cameraUsers, setCameraUsers] = useState(new Set());
 
+  // Video effects state
+  const [activeEffect, setActiveEffectState] = useState(() => {
+    const saved = localStorage.getItem('disclone_video_effect');
+    return saved && EFFECT_PRESETS[saved] ? saved : 'none';
+  });
+
   // ── Refs ──
   const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -187,6 +194,8 @@ export default function useVoice(channelId, playSound) {
   const isCameraOnRef = useRef(false);
   const stopCameraRef = useRef(null);
   const createCameraOfferRef = useRef(null);
+  const videoProcessorRef = useRef(null); // VideoEffectsProcessor instance
+  const activeEffectRef = useRef(activeEffect);
 
   // Keep refs in sync
   channelIdRef.current = channelId;
@@ -197,6 +206,7 @@ export default function useVoice(channelId, playSound) {
   sensitivityModeRef.current = sensitivityMode;
   isScreenSharingRef.current = isScreenSharing;
   isCameraOnRef.current = isCameraOn;
+  activeEffectRef.current = activeEffect;
 
   const setSensitivity = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
@@ -1346,6 +1356,10 @@ export default function useVoice(channelId, playSound) {
         setIsCameraOn(false);
         isCameraOnRef.current = false;
       }
+      if (videoProcessorRef.current) {
+        videoProcessorRef.current.stop();
+        videoProcessorRef.current = null;
+      }
       if (cameraStreamRef.current) {
         cameraStreamRef.current.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
@@ -1781,9 +1795,9 @@ export default function useVoice(channelId, playSound) {
   const startCamera = useCallback(async () => {
     if (!socket || !channelIdRef.current || isCameraOnRef.current) return;
 
-    let stream;
+    let rawStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      rawStream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
       });
     } catch (err) {
@@ -1792,12 +1806,28 @@ export default function useVoice(channelId, playSound) {
       return;
     }
 
+    // Pipe through video effects processor
+    const processor = new VideoEffectsProcessor();
+    videoProcessorRef.current = processor;
+    const savedEffect = activeEffectRef.current;
+    const effectConfig = EFFECT_PRESETS[savedEffect] || EFFECT_PRESETS.none;
+    processor._effect = effectConfig;
+    let stream;
+    try {
+      stream = await processor.start(rawStream);
+    } catch (err) {
+      console.error('[Camera] Video effects processor error:', err);
+      stream = rawStream;
+    }
+
     cameraStreamRef.current = stream;
 
     socket.emit('camera:start', { channelId: channelIdRef.current }, (response) => {
       if (!response?.success) {
         alert(response?.error || 'Could not start camera');
-        stream.getTracks().forEach((t) => t.stop());
+        processor.stop();
+        videoProcessorRef.current = null;
+        rawStream.getTracks().forEach((t) => t.stop());
         cameraStreamRef.current = null;
         return;
       }
@@ -1813,7 +1843,7 @@ export default function useVoice(channelId, playSound) {
     });
 
     // Stop camera if video track ends (e.g., browser UI or permission revocation)
-    const videoTrack = stream.getVideoTracks()[0];
+    const videoTrack = rawStream.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.addEventListener('ended', () => {
         stopCameraRef.current?.();
@@ -1824,6 +1854,12 @@ export default function useVoice(channelId, playSound) {
   const stopCamera = useCallback(() => {
     if (!socket) return;
     socket.emit('camera:stop', { channelId: channelIdRef.current });
+
+    // Stop video effects processor first
+    if (videoProcessorRef.current) {
+      videoProcessorRef.current.stop();
+      videoProcessorRef.current = null;
+    }
 
     if (cameraStreamRef.current) {
       cameraStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -1843,6 +1879,35 @@ export default function useVoice(channelId, playSound) {
   }, [socket]);
 
   stopCameraRef.current = stopCamera;
+
+  const setVideoEffect = useCallback(async (effectKey) => {
+    const config = EFFECT_PRESETS[effectKey] || EFFECT_PRESETS.none;
+    setActiveEffectState(effectKey);
+    localStorage.setItem('disclone_video_effect', effectKey);
+
+    const processor = videoProcessorRef.current;
+    if (!processor) return; // camera not active
+
+    try {
+      const newStream = await processor.setEffect(config);
+      if (newStream && newStream !== cameraStreamRef.current) {
+        cameraStreamRef.current = newStream;
+        // Replace track on all camera peer connections (no renegotiation needed)
+        const newTrack = newStream.getVideoTracks()[0];
+        if (newTrack) {
+          for (const [, pc] of cameraPCsRef.current) {
+            for (const sender of pc.getSenders()) {
+              if (sender.track?.kind === 'video') {
+                sender.replaceTrack(newTrack).catch(() => {});
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Camera] setVideoEffect error:', err);
+    }
+  }, []);
 
   const setMusicVolume = useCallback((val) => {
     const v = Math.max(0, Math.min(100, Math.round(val)));
@@ -1902,5 +1967,7 @@ export default function useVoice(channelId, playSound) {
     startCamera,
     stopCamera,
     cameraSupported,
+    activeEffect,
+    setVideoEffect,
   };
 }
