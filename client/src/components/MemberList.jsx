@@ -239,7 +239,7 @@ export default function MemberList({ users, currentUser, onOpenDM, user, userSta
           {/* Status picker */}
           {showStatusPicker && (
             <div ref={statusRef} className="absolute bottom-full right-0 lg:right-auto lg:left-2 mb-2 bg-discord-dark rounded-lg shadow-2xl border border-white/10 py-1.5 z-50 w-48 popover-enter">
-              {Object.entries(STATUS_CONFIG).map(([key, config]) => (
+              {Object.entries(STATUS_CONFIG).filter(([key]) => key !== 'offline').map(([key, config]) => (
                 <button
                   key={key}
                   onClick={() => {

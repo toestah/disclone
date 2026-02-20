@@ -6,4 +6,5 @@ certs/
 tests/results/
 tests/node_modules/
 .playwright-mcp/
+screenshots/
 *.png
