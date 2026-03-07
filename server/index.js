@@ -210,6 +210,98 @@ function getUserDMList(username) {
   return result;
 }
 
+// ── Message Helpers ──────────────────────────────────────────────
+
+function validateAttachments(attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+  if (attachments.length > 5) return null; // max 5 images
+  const valid = [];
+  for (const att of attachments) {
+    if (att.type !== 'image' || typeof att.data !== 'string') return null;
+    if (!att.data.startsWith('data:image/')) return null;
+    if (att.data.length > 2.8e6) return null; // ~2.8MB base64
+    valid.push({ type: att.type, data: att.data });
+  }
+  return valid;
+}
+
+function createMessage(session, content, validAttachments) {
+  const trimmedContent = content ? content.trim() : '';
+  if (!trimmedContent && validAttachments.length === 0) return null;
+  if (trimmedContent.length > 2000) return null;
+
+  const message = {
+    id: String(++messageIdCounter),
+    username: session.username,
+    avatarColor: session.avatarColor,
+    content: trimmedContent,
+    timestamp: Date.now(),
+  };
+  if (validAttachments.length > 0) {
+    message.attachments = validAttachments;
+  }
+  return message;
+}
+
+function appendToHistory(channelId, message) {
+  if (!messageHistory.has(channelId)) {
+    messageHistory.set(channelId, []);
+  }
+  const history = messageHistory.get(channelId);
+  history.push(message);
+  if (history.length > 500) history.splice(0, history.length - 500);
+}
+
+// ── Voice Cleanup Helper ─────────────────────────────────────────
+
+function cleanupVoiceUser(socket, roomId) {
+  const room = voiceRooms.get(roomId);
+  if (!room || !room.has(socket.id)) return;
+
+  // Clean up music sharing
+  if (musicSharers.get(roomId)?.socketId === socket.id) {
+    musicSharers.delete(roomId);
+    socket.to(`voice:${roomId}`).emit('music:stopped', {
+      channelId: roomId,
+      socketId: socket.id,
+    });
+  }
+
+  // Clean up screen sharing
+  if (screenSharers.get(roomId)?.socketId === socket.id) {
+    screenSharers.delete(roomId);
+    socket.to(`voice:${roomId}`).emit('screen:stopped', {
+      channelId: roomId,
+      socketId: socket.id,
+    });
+  }
+
+  // Clean up camera
+  const camSet = cameraUsers.get(roomId);
+  if (camSet && camSet.has(socket.id)) {
+    camSet.delete(socket.id);
+    socket.to(`voice:${roomId}`).emit('camera:user-stopped', {
+      channelId: roomId,
+      socketId: socket.id,
+    });
+  }
+
+  room.delete(socket.id);
+  socket.leave(`voice:${roomId}`);
+  speakingState.delete(socket.id);
+  mutedState.delete(socket.id);
+
+  socket.to(`voice:${roomId}`).emit('voice:user-left', {
+    channelId: roomId,
+    socketId: socket.id,
+  });
+
+  io.emit('voice:room-update', {
+    channelId: roomId,
+    members: getVoiceRoomMembers(roomId),
+  });
+}
+
 // ── Socket.IO ────────────────────────────────────────────────────
 
 io.on('connection', (socket) => {
@@ -311,37 +403,14 @@ io.on('connection', (socket) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
 
-    // Validate attachments
-    let validAttachments = [];
-    if (Array.isArray(attachments) && attachments.length > 0) {
-      if (attachments.length > 5) return; // max 5 images
-      for (const att of attachments) {
-        if (att.type !== 'image' || typeof att.data !== 'string') return;
-        if (!att.data.startsWith('data:image/')) return;
-        if (att.data.length > 2.8e6) return; // ~2.8MB base64
-        validAttachments.push({ type: att.type, data: att.data });
-      }
-    }
+    const validAttachments = validateAttachments(attachments);
+    if (validAttachments === null) return;
 
-    const trimmedContent = content ? content.trim() : '';
-    if (!trimmedContent && validAttachments.length === 0) return;
-    if (trimmedContent.length > 2000) return;
+    const message = createMessage(session, content, validAttachments);
+    if (!message) return;
 
-    const message = {
-      id: String(++messageIdCounter),
-      username: session.username,
-      avatarColor: session.avatarColor,
-      content: trimmedContent,
-      timestamp: Date.now(),
-    };
-    if (validAttachments.length > 0) {
-      message.attachments = validAttachments;
-    }
-
-    const history = messageHistory.get(channelId);
-    if (history) {
-      history.push(message);
-      if (history.length > 500) history.splice(0, history.length - 500);
+    if (messageHistory.has(channelId)) {
+      appendToHistory(channelId, message);
     }
 
     io.to(channelId).emit('message:new', { channelId, message });
@@ -407,16 +476,7 @@ io.on('connection', (socket) => {
     // Leave any current voice room
     for (const [roomId, room] of voiceRooms) {
       if (room.has(socket.id)) {
-        room.delete(socket.id);
-        socket.leave(`voice:${roomId}`);
-        socket.to(`voice:${roomId}`).emit('voice:user-left', {
-          channelId: roomId,
-          socketId: socket.id,
-        });
-        io.emit('voice:room-update', {
-          channelId: roomId,
-          members: getVoiceRoomMembers(roomId),
-        });
+        cleanupVoiceUser(socket, roomId);
       }
     }
 
@@ -506,52 +566,8 @@ io.on('connection', (socket) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
 
-    const room = voiceRooms.get(channelId);
-    if (room) {
-      // Clean up music sharing if this user was sharing
-      if (musicSharers.get(channelId)?.socketId === socket.id) {
-        musicSharers.delete(channelId);
-        socket.to(`voice:${channelId}`).emit('music:stopped', {
-          channelId,
-          socketId: socket.id,
-        });
-      }
-
-      // Clean up screen sharing if this user was sharing
-      if (screenSharers.get(channelId)?.socketId === socket.id) {
-        screenSharers.delete(channelId);
-        socket.to(`voice:${channelId}`).emit('screen:stopped', {
-          channelId,
-          socketId: socket.id,
-        });
-      }
-
-      // Clean up camera if this user had camera on
-      const camSet = cameraUsers.get(channelId);
-      if (camSet && camSet.has(socket.id)) {
-        camSet.delete(socket.id);
-        socket.to(`voice:${channelId}`).emit('camera:user-stopped', {
-          channelId,
-          socketId: socket.id,
-        });
-      }
-
-      room.delete(socket.id);
-      socket.leave(`voice:${channelId}`);
-      speakingState.delete(socket.id);
-      mutedState.delete(socket.id);
-
-      socket.to(`voice:${channelId}`).emit('voice:user-left', {
-        channelId,
-        socketId: socket.id,
-      });
-
-      io.emit('voice:room-update', {
-        channelId,
-        members: getVoiceRoomMembers(channelId),
-      });
-      io.emit('users:update', getAllUsersForBroadcast());
-    }
+    cleanupVoiceUser(socket, channelId);
+    io.emit('users:update', getAllUsersForBroadcast());
   });
 
   // ── Voice Speaking / Muted State ──
@@ -869,43 +885,16 @@ io.on('connection', (socket) => {
     const session = activeSessions.get(socket.id);
     if (!session) return;
 
-    // Validate sender is a participant
     const participants = getDMParticipants(dmChannelId);
     if (!participants.includes(session.username)) return;
 
-    // Validate attachments
-    let validAttachments = [];
-    if (Array.isArray(attachments) && attachments.length > 0) {
-      if (attachments.length > 5) return;
-      for (const att of attachments) {
-        if (att.type !== 'image' || typeof att.data !== 'string') return;
-        if (!att.data.startsWith('data:image/')) return;
-        if (att.data.length > 2.8e6) return;
-        validAttachments.push({ type: att.type, data: att.data });
-      }
-    }
+    const validAttachments = validateAttachments(attachments);
+    if (validAttachments === null) return;
 
-    const trimmedContent = content ? content.trim() : '';
-    if (!trimmedContent && validAttachments.length === 0) return;
-    if (trimmedContent.length > 2000) return;
+    const message = createMessage(session, content, validAttachments);
+    if (!message) return;
 
-    const message = {
-      id: String(++messageIdCounter),
-      username: session.username,
-      avatarColor: session.avatarColor,
-      content: trimmedContent,
-      timestamp: Date.now(),
-    };
-    if (validAttachments.length > 0) {
-      message.attachments = validAttachments;
-    }
-
-    if (!messageHistory.has(dmChannelId)) {
-      messageHistory.set(dmChannelId, []);
-    }
-    const history = messageHistory.get(dmChannelId);
-    history.push(message);
-    if (history.length > 500) history.splice(0, history.length - 500);
+    appendToHistory(dmChannelId, message);
 
     io.to(dmChannelId).emit('dm:new', { dmChannelId, message });
   });
@@ -952,48 +941,9 @@ io.on('connection', (socket) => {
 
     for (const [roomId, room] of voiceRooms) {
       if (room.has(socket.id)) {
-        // Clean up music sharing if this user was sharing
-        if (musicSharers.get(roomId)?.socketId === socket.id) {
-          musicSharers.delete(roomId);
-          socket.to(`voice:${roomId}`).emit('music:stopped', {
-            channelId: roomId,
-            socketId: socket.id,
-          });
-        }
-
-        // Clean up screen sharing if this user was sharing
-        if (screenSharers.get(roomId)?.socketId === socket.id) {
-          screenSharers.delete(roomId);
-          socket.to(`voice:${roomId}`).emit('screen:stopped', {
-            channelId: roomId,
-            socketId: socket.id,
-          });
-        }
-
-        // Clean up camera if this user had camera on
-        const camSet = cameraUsers.get(roomId);
-        if (camSet && camSet.has(socket.id)) {
-          camSet.delete(socket.id);
-          socket.to(`voice:${roomId}`).emit('camera:user-stopped', {
-            channelId: roomId,
-            socketId: socket.id,
-          });
-        }
-
-        room.delete(socket.id);
-        socket.to(`voice:${roomId}`).emit('voice:user-left', {
-          channelId: roomId,
-          socketId: socket.id,
-        });
-        io.emit('voice:room-update', {
-          channelId: roomId,
-          members: getVoiceRoomMembers(roomId),
-        });
+        cleanupVoiceUser(socket, roomId);
       }
     }
-
-    speakingState.delete(socket.id);
-    mutedState.delete(socket.id);
     activeSessions.delete(socket.id);
     io.emit('users:update', getAllUsersForBroadcast());
   });

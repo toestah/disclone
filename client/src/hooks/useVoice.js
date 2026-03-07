@@ -907,7 +907,7 @@ export default function useVoice(channelId, playSound) {
 
     // ── Camera event handlers ──
 
-    function handleCameraUserStarted({ socketId, username }) {
+    function handleCameraUserStarted({ socketId }) {
       setCameraUsers((prev) => {
         const next = new Set(prev);
         next.add(socketId);

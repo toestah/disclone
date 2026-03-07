@@ -56,6 +56,40 @@ function AppContent() {
   useEffect(() => { activeDMRef.current = activeDM; }, [activeDM]);
   useEffect(() => { userRef.current = user; }, [user]);
 
+  // Shared post-login processing (used by both auto-login and manual login)
+  const processLoginResponse = useCallback((response) => {
+    setUser(response.user);
+    setChannels(response.channels);
+    if (response.dmChannels) setDmChannels(response.dmChannels);
+    const savedStatus = localStorage.getItem('disclone_user_status') || 'online';
+    setUserStatusState(savedStatus);
+    socket.emit('user:status', { status: savedStatus });
+    if (response.voiceState) {
+      setVoiceMembers((prev) => {
+        const next = new Map(prev);
+        for (const [roomId, members] of Object.entries(response.voiceState)) {
+          next.set(roomId, members);
+        }
+        return next;
+      });
+    }
+    socket.emit('channel:join', { channelId: 'general' }, (res) => {
+      if (res?.success) {
+        setMessages((prev) => {
+          const next = new Map(prev);
+          next.set('general', res.messages);
+          return next;
+        });
+      }
+    });
+    setUnreads((prev) => {
+      if (!prev.has('general')) return prev;
+      const next = new Map(prev);
+      next.delete('general');
+      return next;
+    });
+  }, [socket]);
+
   // Persist unreads to localStorage
   useEffect(() => {
     localStorage.setItem('disclone_unreads', JSON.stringify([...unreads]));
@@ -73,39 +107,7 @@ function AppContent() {
       if (username) {
         socket.emit('user:login', { username, password }, (response) => {
           if (response.success) {
-            setUser(response.user);
-            setChannels(response.channels);
-            if (response.dmChannels) setDmChannels(response.dmChannels);
-            // Restore saved status
-            const savedStatus = localStorage.getItem('disclone_user_status') || 'online';
-            setUserStatusState(savedStatus);
-            socket.emit('user:status', { status: savedStatus });
-            // Load initial voice room state
-            if (response.voiceState) {
-              setVoiceMembers((prev) => {
-                const next = new Map(prev);
-                for (const [roomId, members] of Object.entries(response.voiceState)) {
-                  next.set(roomId, members);
-                }
-                return next;
-              });
-            }
-            socket.emit('channel:join', { channelId: 'general' }, (res) => {
-              if (res?.success) {
-                setMessages((prev) => {
-                  const next = new Map(prev);
-                  next.set('general', res.messages);
-                  return next;
-                });
-              }
-            });
-            // Clear unreads for general on login
-            setUnreads((prev) => {
-              if (!prev.has('general')) return prev;
-              const next = new Map(prev);
-              next.delete('general');
-              return next;
-            });
+            processLoginResponse(response);
             // Auto-rejoin voice channel on reconnect
             if (isReconnectRef.current && voiceChannelRef.current) {
               const savedVC = voiceChannelRef.current;
@@ -119,7 +121,7 @@ function AppContent() {
     } catch {
       /* ignore */
     }
-  }, [socket, connected]);
+  }, [socket, connected, processLoginResponse]);
 
   // Listen for server events
   useEffect(() => {
@@ -242,49 +244,17 @@ function AppContent() {
       setLoginError('');
       socket.emit('user:login', { username, password }, (response) => {
         if (response.success) {
-          setUser(response.user);
-          setChannels(response.channels);
-          if (response.dmChannels) setDmChannels(response.dmChannels);
+          processLoginResponse(response);
           localStorage.setItem(
             'disclone_session',
             JSON.stringify({ username: response.user.username, password: password || null })
           );
-          // Restore saved status
-          const savedStatus = localStorage.getItem('disclone_user_status') || 'online';
-          setUserStatusState(savedStatus);
-          socket.emit('user:status', { status: savedStatus });
-          // Load initial voice room state
-          if (response.voiceState) {
-            setVoiceMembers((prev) => {
-              const next = new Map(prev);
-              for (const [roomId, members] of Object.entries(response.voiceState)) {
-                next.set(roomId, members);
-              }
-              return next;
-            });
-          }
-          socket.emit('channel:join', { channelId: 'general' }, (res) => {
-            if (res?.success) {
-              setMessages((prev) => {
-                const next = new Map(prev);
-                next.set('general', res.messages);
-                return next;
-              });
-            }
-          });
-          // Clear unreads for general on login
-          setUnreads((prev) => {
-            if (!prev.has('general')) return prev;
-            const next = new Map(prev);
-            next.delete('general');
-            return next;
-          });
         } else {
           setLoginError(response.error);
         }
       });
     },
-    [socket]
+    [socket, processLoginResponse]
   );
 
   const handleChannelSelect = useCallback(
@@ -457,15 +427,6 @@ function AppContent() {
   // Find DM target username for header
   const activeDMInfo = activeDM ? dmChannels.find((d) => d.id === activeDM) : null;
 
-  const memberListProps = {
-    user,
-    userStatus,
-    onStatusChange: handleStatusChange,
-    onLogout: handleLogout,
-    voiceState,
-    voiceChannel,
-    sounds,
-  };
 
   return (
     <div className="flex h-screen w-screen overflow-clip noise-texture">
@@ -593,7 +554,13 @@ function AppContent() {
           users={onlineUsers}
           currentUser={user.username}
           onOpenDM={handleOpenDM}
-          {...memberListProps}
+          user={user}
+          userStatus={userStatus}
+          onStatusChange={handleStatusChange}
+          onLogout={handleLogout}
+          voiceState={voiceState}
+          voiceChannel={voiceChannel}
+          sounds={sounds}
         />
       </div>
 

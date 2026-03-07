@@ -1,21 +1,20 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
-export default function LoginScreen({ onLogin, connected, error }) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-
-  useEffect(() => {
+function getSavedUsername() {
+  try {
     const saved = localStorage.getItem('disclone_session');
     if (saved) {
-      try {
-        const { username: savedUser } = JSON.parse(saved);
-        if (savedUser) setUsername(savedUser);
-      } catch {
-        /* ignore */
-      }
+      const { username } = JSON.parse(saved);
+      return username || '';
     }
-  }, []);
+  } catch { /* ignore */ }
+  return '';
+}
+
+export default function LoginScreen({ onLogin, connected, error }) {
+  const [username, setUsername] = useState(getSavedUsername);
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleSubmit = (e) => {
     e.preventDefault();

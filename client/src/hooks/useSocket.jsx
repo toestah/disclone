@@ -1,33 +1,30 @@
-import { useState, useEffect, useRef, createContext, useContext } from 'react';
+import { useState, useEffect, useMemo, createContext, useContext } from 'react';
 import { io } from 'socket.io-client';
 
 const SocketContext = createContext(null);
 
 export function SocketProvider({ children }) {
-  const socketRef = useRef(null);
+  const socket = useMemo(() => io({
+    autoConnect: true,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 10000,
+  }), []);
+
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const socket = io({
-      autoConnect: true,
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 10000,
-    });
-
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
-
-    socketRef.current = socket;
 
     return () => {
       socket.disconnect();
     };
-  }, []);
+  }, [socket]);
 
   return (
-    <SocketContext.Provider value={{ socket: socketRef.current, connected }}>
+    <SocketContext.Provider value={{ socket, connected }}>
       {children}
     </SocketContext.Provider>
   );
