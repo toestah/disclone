@@ -416,7 +416,7 @@ io.on('connection', (socket) => {
     io.to(channelId).emit('message:new', { channelId, message });
 
     // Notify users not in this channel about the new message (for unread badges)
-    const mentions = parseMentions(trimmedContent);
+    const mentions = parseMentions(message.content);
     for (const [sid, sess] of activeSessions) {
       if (sid === socket.id) continue;
       if (sess.currentChannel === channelId) continue;

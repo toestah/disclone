@@ -1,6 +1,6 @@
 {
   "name": "disclone",
-  "version": "1.5.3",
+  "version": "1.5.5",
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
