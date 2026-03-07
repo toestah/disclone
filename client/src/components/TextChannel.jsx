@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 
 function formatTimestamp(ts) {
   const date = new Date(ts);
@@ -147,20 +148,40 @@ function MessageContent({ content, onlineUsers, onOpenDM }) {
   );
 }
 
-function MessageAttachments({ attachments }) {
+function MessageAttachments({ attachments, onImageClick }) {
   if (!attachments || attachments.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-2 mt-1.5">
       {attachments.map((att, i) => (
-        <a key={i} href={att.data} target="_blank" rel="noopener noreferrer">
-          <img
-            src={att.data}
-            alt="attachment"
-            className="max-w-[400px] max-h-[300px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-90 transition-opacity"
-          />
-        </a>
+        <img
+          key={i}
+          src={att.data}
+          alt="attachment"
+          onClick={() => onImageClick?.(att.data)}
+          className="max-w-[400px] max-h-[300px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-90 transition-opacity"
+        />
       ))}
     </div>
+  );
+}
+
+function ImageLightbox({ src, onClose }) {
+  useEffect(() => {
+    const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm" onClick={onClose}>
+      <img
+        src={src}
+        alt="preview"
+        className="max-w-[90vw] max-h-[90vh] rounded-lg object-contain shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>,
+    document.body
   );
 }
 
@@ -269,6 +290,7 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState([]);
   const [hoveredMsgId, setHoveredMsgId] = useState(null);
+  const [lightboxSrc, setLightboxSrc] = useState(null);
   const [mentionQuery, setMentionQuery] = useState(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const messagesEndRef = useRef(null);
@@ -401,6 +423,8 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
   const placeholder = isDM ? `Message @${dmTarget}` : `Message #${channel.name}`;
 
   return (
+    <>
+    {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     <div className="flex flex-col flex-1 min-h-0 channel-transition">
       {/* Channel header */}
       <div className="h-12 px-4 flex items-center shadow-[0_1px_0_rgba(0,0,0,0.2),0_1px_2px_rgba(0,0,0,0.1)] border-b border-black/30 flex-shrink-0 z-10 gap-2">
@@ -461,7 +485,7 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
                   </div>
                 )}
                 <MessageContent content={msg.content} onlineUsers={onlineUsers} onOpenDM={onOpenDM} />
-                <MessageAttachments attachments={msg.attachments} />
+                <MessageAttachments attachments={msg.attachments} onImageClick={setLightboxSrc} />
                 <ReactionPills reactions={msg.reactions} currentUser={currentUser} onToggle={reactTo} />
               </div>
             );
@@ -498,7 +522,7 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
                   </span>
                 </div>
                 <MessageContent content={msg.content} onlineUsers={onlineUsers} onOpenDM={onOpenDM} />
-                <MessageAttachments attachments={msg.attachments} />
+                <MessageAttachments attachments={msg.attachments} onImageClick={setLightboxSrc} />
                 <ReactionPills reactions={msg.reactions} currentUser={currentUser} onToggle={reactTo} />
               </div>
             </div>
@@ -603,5 +627,6 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
         </div>
       </form>
     </div>
+    </>
   );
 }
