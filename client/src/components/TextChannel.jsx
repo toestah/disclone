@@ -413,22 +413,21 @@ export default function TextChannel({ channel, messages, onSendMessage, onReact,
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
-          <div className="mt-auto flex flex-col items-start pb-4 pt-8">
+          <div className="mt-auto flex flex-col items-start pb-6">
+            <div className="w-10 h-[2px] rounded-full bg-gradient-to-r from-discord-accent to-transparent mb-4 opacity-60" />
             {isDM ? (
               <>
-                <div className="w-[68px] h-[68px] bg-discord-active rounded-full flex items-center justify-center mb-4">
-                  <span className="text-3xl font-light text-discord-muted">@</span>
-                </div>
-                <h3 className="text-[28px] font-bold text-white mb-1">{dmTarget}</h3>
-                <p className="text-discord-muted text-sm">This is the beginning of your direct message history with {dmTarget}.</p>
+                <h3 className="text-xl font-bold text-white mb-1">{dmTarget}</h3>
+                <p className="text-discord-muted/70 text-[13px] leading-relaxed">
+                  This is the very beginning of your conversation with <span className="text-discord-text font-medium">{dmTarget}</span>. Say something nice.
+                </p>
               </>
             ) : (
               <>
-                <div className="w-[68px] h-[68px] bg-discord-active rounded-full flex items-center justify-center mb-4">
-                  <span className="text-3xl font-light text-discord-muted">#</span>
-                </div>
-                <h3 className="text-[28px] font-bold text-white mb-1">Welcome to #{channel.name}!</h3>
-                <p className="text-discord-muted text-sm">This is the start of the #{channel.name} channel.</p>
+                <h3 className="text-xl font-bold text-white mb-1">Welcome to <span className="text-discord-accent">#{channel.name}</span></h3>
+                <p className="text-discord-muted/70 text-[13px] leading-relaxed">
+                  This is the start of the <span className="text-discord-text font-medium">#{channel.name}</span> channel. Start the conversation below.
+                </p>
               </>
             )}
           </div>
